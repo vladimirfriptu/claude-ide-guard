@@ -29,7 +29,7 @@ class GuardRouter(
         }
         when (action) {
             "start" -> state.start(path, sessionId, clock())
-            "end" -> state.end(path)
+            "end" -> state.end(path, clock())
             else -> return Result(400, MiniJson.obj("ok" to "false", "error" to "unknown action: $action"))
         }
         return Result(200, """{"ok":true}""")

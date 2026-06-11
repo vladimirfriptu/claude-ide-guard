@@ -29,7 +29,11 @@ object GuardEditorLocker {
         app.invokeLater {
             val enabled = GuardSettings.getInstance().lockEditorWhileEditing
             val state = app.getService(GuardState::class.java)
-            val desired = if (enabled) state.snapshot().mapTo(HashSet()) { it.path } else HashSet()
+            val desired = if (enabled) {
+                state.snapshot().filter { it.isEditing }.mapTo(HashSet()) { it.path }
+            } else {
+                HashSet()
+            }
 
             val fdm = FileDocumentManager.getInstance()
             val lfs = LocalFileSystem.getInstance()

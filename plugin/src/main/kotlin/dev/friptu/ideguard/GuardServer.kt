@@ -48,20 +48,28 @@ class GuardServer : Disposable {
             GuardUiRefresher.install(state)
             GuardEditorLocker.install(state)
             sweepFuture = AppExecutorUtil.getAppScheduledExecutorService().scheduleWithFixedDelay(
-                { runCatching { state.sweep(System.currentTimeMillis(), TTL_MILLIS) } },
+                { runCatching { state.sweep(System.currentTimeMillis(), ACTIVE_TTL_MILLIS, RECENT_TTL_MILLIS) } },
                 SWEEP_INTERVAL_SEC, SWEEP_INTERVAL_SEC, TimeUnit.SECONDS,
             )
             initialized = true
         }
-        startHttp(GuardSettings.getInstance().port)
+        startHttp(resolvePort())
     }
 
     /** Rebinds the HTTP server to the currently configured port. */
     @Synchronized
     fun restart() {
         stopHttp()
-        startHttp(GuardSettings.getInstance().port)
+        startHttp(resolvePort())
     }
+
+    /**
+     * The `claude.ide.guard.port` system property wins over the persisted
+     * setting. The sandbox passes it so it never collides with a production
+     * instance already holding the default port.
+     */
+    private fun resolvePort(): Int =
+        System.getProperty(PORT_PROPERTY)?.toIntOrNull() ?: GuardSettings.getInstance().port
 
     private fun startHttp(port: Int) {
         if (server != null) return
@@ -128,7 +136,9 @@ class GuardServer : Disposable {
 
     companion object {
         const val DEFAULT_PORT = 7337
-        const val TTL_MILLIS = 60_000L
+        const val PORT_PROPERTY = "claude.ide.guard.port"
+        const val ACTIVE_TTL_MILLIS = 5 * 60_000L
+        const val RECENT_TTL_MILLIS = 15 * 60_000L
         const val SWEEP_INTERVAL_SEC = 15L
 
         fun respondJson(exchange: HttpExchange, status: Int, body: String) {

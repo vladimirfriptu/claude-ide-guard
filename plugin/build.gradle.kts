@@ -45,6 +45,12 @@ kotlin {
     }
 }
 
+// Sandbox runs on a separate port so it never collides with a production
+// instance already holding the default 7337.
+tasks.named<org.jetbrains.intellij.platform.gradle.tasks.RunIdeTask>("runIde") {
+    jvmArgs("-Dclaude.ide.guard.port=7338")
+}
+
 java {
     sourceCompatibility = JavaVersion.VERSION_21
     targetCompatibility = JavaVersion.VERSION_21
