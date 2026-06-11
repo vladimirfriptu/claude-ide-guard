@@ -15,6 +15,7 @@ class GuardSettings : PersistentStateComponent<GuardSettings.State> {
         var port: Int = GuardServer.DEFAULT_PORT,
         var lockEditorWhileEditing: Boolean = false,
         var lockLeaseSeconds: Int = 300,
+        var bashDetectionEnabled: Boolean = true,
     )
 
     private var state = State()
@@ -33,6 +34,10 @@ class GuardSettings : PersistentStateComponent<GuardSettings.State> {
     var lockLeaseSeconds: Int
         get() = state.lockLeaseSeconds
         set(value) { state.lockLeaseSeconds = value }
+
+    var bashDetectionEnabled: Boolean
+        get() = state.bashDetectionEnabled
+        set(value) { state.bashDetectionEnabled = value }
 
     companion object {
         fun getInstance(): GuardSettings =

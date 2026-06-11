@@ -129,6 +129,25 @@ Response:
 { "ok": true }
 ```
 
+### `POST /acquire-bash`
+
+Request body:
+```json
+{ "command": "cat src/a.ts > src/b.ts", "cwd": "/abs/project", "sessionId": "agent-uuid" }
+```
+
+The arbiter parses the command heuristically, keeps only paths inside an open
+project root, and acquires the whole implied READ/WRITE set atomically
+(all-or-nothing). Response matches `/acquire`: `granted`, `dirty` (true when any
+write target has unsaved changes), and `heldBy`/`heldMode` when `granted:false`.
+When Bash detection is disabled in settings, it returns `{"granted":true,"dirty":false}`
+without locking anything.
+
+### `POST /release-bash`
+
+Request body identical to `/acquire-bash`. Re-parses the command and releases this
+session's lock set. Response: `{ "ok": true }`.
+
 ### `GET /health`
 
 ```json
@@ -144,10 +163,13 @@ setup silently allows the tool — Claude is never permanently blocked.
 
 ```sh
 mkdir -p ~/.claude/hooks
-cp hooks/ide-guard-write-pre.sh hooks/ide-guard-read-pre.sh hooks/ide-guard-post.sh ~/.claude/hooks/
+cp hooks/ide-guard-write-pre.sh hooks/ide-guard-read-pre.sh hooks/ide-guard-post.sh \
+   hooks/ide-guard-bash-pre.sh hooks/ide-guard-bash-post.sh ~/.claude/hooks/
 chmod +x ~/.claude/hooks/ide-guard-write-pre.sh \
          ~/.claude/hooks/ide-guard-read-pre.sh \
-         ~/.claude/hooks/ide-guard-post.sh
+         ~/.claude/hooks/ide-guard-post.sh \
+         ~/.claude/hooks/ide-guard-bash-pre.sh \
+         ~/.claude/hooks/ide-guard-bash-post.sh
 ```
 
 ### 2. Register them in `~/.claude/settings.json`
@@ -177,7 +199,9 @@ The snippet registers:
 |---|---|---|
 | PreToolUse | `Edit\|Write\|MultiEdit\|NotebookEdit` | `ide-guard-write-pre.sh` |
 | PreToolUse | `Read` | `ide-guard-read-pre.sh` |
+| PreToolUse | `Bash` | `ide-guard-bash-pre.sh` |
 | PostToolUse | `Edit\|Write\|MultiEdit\|NotebookEdit\|Read` | `ide-guard-post.sh` |
+| PostToolUse | `Bash` | `ide-guard-bash-post.sh` |
 
 ### 3. Reload Claude Code
 
@@ -228,6 +252,9 @@ Set them in your shell profile or in the `env` section of `~/.claude/settings.js
 - **Lock lease (sec)** (default `300`). How long a held lock survives without a
   refresh before it is force-released by the sweep. This protects against
   orphaned locks left by a killed or crashed agent session.
+- **Detect file access in Bash commands** (default on). When on, Bash commands
+  that read or write files are parsed and take the same locks as `Read`/`Edit`.
+  Heuristic — uncheck if it ever locks the wrong files.
 
 ## Troubleshooting
 
@@ -250,12 +277,15 @@ Set them in your shell profile or in the `env` section of `~/.claude/settings.js
   (same IDE process) coordinate with each other. Agents talking to different
   IDE instances have no visibility into each other's locks.
 
-## Known limitation
+## Bash detection
 
-Bash-based reads and writes (`cat`, `>`, `sed -i`, etc.) currently bypass the
-hooks — the hooks only fire for Claude Code's built-in file tools (`Read`,
-`Edit`, `Write`, `MultiEdit`, `NotebookEdit`). Coordinating shell commands is
-planned as a follow-up.
+File access via Bash (`cat`, `>`, `>>`, `tee`, `sed -i`, `cp`, `mv`, `touch`,
+`grep file`, …) is detected heuristically and participates in the same lock and
+visibility as the built-in tools. Parsing happens in the plugin; it deliberately
+**skips** anything ambiguous (globs, `$variables`, unknown commands, paths
+outside the project, `rm`/`mkdir`) — biased toward missing rather than locking the
+wrong file. Toggle it in **Settings → Tools → Claude IDE Guard → Detect file
+access in Bash commands** (on by default).
 
 ## Out of scope (MVP)
 

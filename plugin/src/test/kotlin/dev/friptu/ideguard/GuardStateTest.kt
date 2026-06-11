@@ -101,4 +101,55 @@ class GuardStateTest {
         s.release("/a", "s1", now = 12)                  // +1
         assertTrue(calls.get() >= 3)
     }
+
+    @Test
+    fun acquireSetGrantsAllOrNothing() {
+        val s = GuardState()
+        // s2 holds a write on /b -> the whole set must be denied
+        s.acquire("/b", "s2", LockMode.WRITE, now = 5)
+        val set = listOf(FileAccess("/a", LockMode.READ), FileAccess("/b", LockMode.WRITE))
+        val res = s.acquireSet(set, "s1", now = 10)
+        assertFalse(res.granted)
+        assertEquals("s2", res.heldBy)
+        // /a must NOT have been left locked by the failed attempt (rollback)
+        assertFalse(s.isInFlight("/a"))
+    }
+
+    @Test
+    fun acquireSetSucceedsWhenFree() {
+        val s = GuardState()
+        val set = listOf(FileAccess("/a", LockMode.READ), FileAccess("/b", LockMode.WRITE))
+        val res = s.acquireSet(set, "s1", now = 10)
+        assertTrue(res.granted)
+        assertEquals(LockMode.READ, s.modeOf("/a"))
+        assertEquals(LockMode.WRITE, s.modeOf("/b"))
+    }
+
+    @Test
+    fun releaseSetFreesEntireSet() {
+        val s = GuardState()
+        val set = listOf(FileAccess("/a", LockMode.READ), FileAccess("/b", LockMode.WRITE))
+        s.acquireSet(set, "s1", now = 10)
+        s.releaseSet(set.map { it.path }, "s1", now = 20)
+        assertFalse(s.isInFlight("/a"))
+        assertFalse(s.isInFlight("/b"))
+    }
+
+    @Test
+    fun acquireSetEmptyIsGranted() {
+        val s = GuardState()
+        assertTrue(s.acquireSet(emptyList(), "s1", now = 10).granted)
+    }
+
+    @Test
+    fun deniedAcquireSetLeavesNoRecentHistory() {
+        val s = GuardState()
+        // /b is write-held by another session, so the set is denied AFTER /a's write is taken
+        s.acquire("/b", "s2", LockMode.WRITE, now = 5)
+        val set = listOf(FileAccess("/a", LockMode.WRITE), FileAccess("/b", LockMode.WRITE))
+        val res = s.acquireSet(set, "s1", now = 10)
+        assertFalse(res.granted)
+        // rollback must NOT leave a phantom "recently written" entry for /a
+        assertTrue(s.snapshot().none { it.path == "/a" })
+    }
 }

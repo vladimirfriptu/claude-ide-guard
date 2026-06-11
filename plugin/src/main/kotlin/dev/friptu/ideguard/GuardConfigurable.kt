@@ -15,6 +15,7 @@ class GuardConfigurable : Configurable {
     private var portField: JBTextField? = null
     private var lockCheckBox: JBCheckBox? = null
     private var leaseField: JBTextField? = null
+    private var bashCheckBox: JBCheckBox? = null
 
     override fun getDisplayName(): String = "Claude IDE Guard"
 
@@ -26,6 +27,8 @@ class GuardConfigurable : Configurable {
         portField = field
         lockCheckBox = check
         leaseField = lease
+        val bash = JBCheckBox("Detect file access in Bash commands (cat, >, cp, sed -i, …)", settings.bashDetectionEnabled)
+        bashCheckBox = bash
 
         return FormBuilder.createFormBuilder()
             .addLabeledComponent("HTTP server port:", field)
@@ -34,6 +37,8 @@ class GuardConfigurable : Configurable {
             .addComponent(JBLabel("Blocks your typing in the IDE; Claude's writes are unaffected. Auto-unlocks when done."))
             .addLabeledComponent("Lock lease (sec):", lease)
             .addComponent(JBLabel("How long a held lock survives without refresh before it is force-released (default 300)."))
+            .addComponent(bash)
+            .addComponent(JBLabel("Heuristic. Off-by-default-safe; uncheck if it locks the wrong files."))
             .panel
     }
 
@@ -41,7 +46,8 @@ class GuardConfigurable : Configurable {
         val settings = GuardSettings.getInstance()
         return portField?.text?.trim() != settings.port.toString() ||
             lockCheckBox?.isSelected != settings.lockEditorWhileEditing ||
-            leaseField?.text?.trim() != settings.lockLeaseSeconds.toString()
+            leaseField?.text?.trim() != settings.lockLeaseSeconds.toString() ||
+            bashCheckBox?.isSelected != settings.bashDetectionEnabled
     }
 
     override fun apply() {
@@ -57,6 +63,7 @@ class GuardConfigurable : Configurable {
         val portChanged = settings.port != port
         settings.port = port
         settings.lockEditorWhileEditing = lockCheckBox?.isSelected ?: false
+        settings.bashDetectionEnabled = bashCheckBox?.isSelected ?: true
         settings.lockLeaseSeconds = lease
 
         if (portChanged) {
@@ -70,6 +77,7 @@ class GuardConfigurable : Configurable {
         val settings = GuardSettings.getInstance()
         portField?.text = settings.port.toString()
         lockCheckBox?.isSelected = settings.lockEditorWhileEditing
+        bashCheckBox?.isSelected = settings.bashDetectionEnabled
         leaseField?.text = settings.lockLeaseSeconds.toString()
     }
 
@@ -77,5 +85,6 @@ class GuardConfigurable : Configurable {
         portField = null
         lockCheckBox = null
         leaseField = null
+        bashCheckBox = null
     }
 }

@@ -34,54 +34,97 @@ class GuardState {
     /** Atomic test-and-set. Returns whether the lock was granted. */
     fun acquire(path: String, sessionId: String, mode: LockMode, now: Long): AcquireResult {
         val result: AcquireResult
-        synchronized(mutex) {
-            val lock = locks.getOrPut(path) { FileLock(now) }
-            result = when (mode) {
-                LockMode.READ -> {
-                    val w = lock.writer
-                    if (w != null && w.sessionId != sessionId) {
-                        AcquireResult(false, w.sessionId, LockMode.WRITE)
-                    } else {
-                        val prev = lock.readers[sessionId]
-                        lock.readers[sessionId] = Holder(sessionId, prev?.acquiredAt ?: now, now)
-                        AcquireResult(true)
-                    }
-                }
-                LockMode.WRITE -> {
-                    val w = lock.writer
-                    val otherReaders = lock.readers.keys.any { it != sessionId }
-                    val blockedByWriter = w != null && w.sessionId != sessionId
-                    when {
-                        blockedByWriter -> AcquireResult(false, w!!.sessionId, LockMode.WRITE)
-                        otherReaders -> AcquireResult(false, lock.readers.keys.first { it != sessionId }, LockMode.READ)
-                        else -> {
-                            lock.readers.remove(sessionId) // upgrade: drop our own read
-                            lock.writer = Holder(sessionId, w?.acquiredAt ?: now, now)
-                            AcquireResult(true)
-                        }
-                    }
-                }
-            }
-            if (result.granted) recent.remove(path)
-        }
+        synchronized(mutex) { result = acquireLocked(path, sessionId, mode, now) }
         if (result.granted) notifyListeners()
         return result
     }
 
     /** Releases this session's hold on [path]. Returns true if something changed. */
     fun release(path: String, sessionId: String, now: Long): Boolean {
+        val changed: Boolean
+        synchronized(mutex) { changed = releaseLocked(path, sessionId, now) }
+        if (changed) notifyListeners()
+        return changed
+    }
+
+    /**
+     * All-or-nothing acquire of a set of paths for one session. If any access in
+     * the set conflicts, every lock taken during this call is rolled back and the
+     * result reports the first conflicting holder. An empty set is granted.
+     */
+    fun acquireSet(accesses: List<FileAccess>, sessionId: String, now: Long): AcquireResult {
+        var result = AcquireResult(true)
+        synchronized(mutex) {
+            val taken = ArrayList<String>()
+            for (a in accesses) {
+                val r = acquireLocked(a.path, sessionId, a.mode, now)
+                if (!r.granted) {
+                    taken.forEach { releaseLocked(it, sessionId, now, recordHistory = false) }
+                    result = r
+                    break
+                }
+                taken.add(a.path)
+            }
+        }
+        if (result.granted) notifyListeners()
+        return result
+    }
+
+    /** Releases this session's hold on every path in [paths]. */
+    fun releaseSet(paths: List<String>, sessionId: String, now: Long): Boolean {
         var changed = false
         synchronized(mutex) {
-            val lock = locks[path] ?: return false
-            if (lock.writer?.sessionId == sessionId) {
-                lock.writer = null
-                recent[path] = FileView(path, LockMode.WRITE, listOf(sessionId), lock.startedAt, now)
-                changed = true
-            }
-            if (lock.readers.remove(sessionId) != null) changed = true
-            if (lock.writer == null && lock.readers.isEmpty()) locks.remove(path)
+            for (p in paths) if (releaseLocked(p, sessionId, now)) changed = true
         }
         if (changed) notifyListeners()
+        return changed
+    }
+
+    /** Caller MUST hold [mutex]. Does not notify. */
+    private fun acquireLocked(path: String, sessionId: String, mode: LockMode, now: Long): AcquireResult {
+        val lock = locks.getOrPut(path) { FileLock(now) }
+        val result = when (mode) {
+            LockMode.READ -> {
+                val w = lock.writer
+                if (w != null && w.sessionId != sessionId) {
+                    AcquireResult(false, w.sessionId, LockMode.WRITE)
+                } else {
+                    val prev = lock.readers[sessionId]
+                    lock.readers[sessionId] = Holder(sessionId, prev?.acquiredAt ?: now, now)
+                    AcquireResult(true)
+                }
+            }
+            LockMode.WRITE -> {
+                val w = lock.writer
+                val otherReaders = lock.readers.keys.any { it != sessionId }
+                val blockedByWriter = w != null && w.sessionId != sessionId
+                when {
+                    blockedByWriter -> AcquireResult(false, w!!.sessionId, LockMode.WRITE)
+                    otherReaders -> AcquireResult(false, lock.readers.keys.first { it != sessionId }, LockMode.READ)
+                    else -> {
+                        lock.readers.remove(sessionId) // upgrade: drop our own read
+                        lock.writer = Holder(sessionId, w?.acquiredAt ?: now, now)
+                        AcquireResult(true)
+                    }
+                }
+            }
+        }
+        if (result.granted) recent.remove(path)
+        return result
+    }
+
+    /** Caller MUST hold [mutex]. Does not notify. [recordHistory] false skips the
+     *  "recent write" entry — used by rollback, where nothing was actually written. */
+    private fun releaseLocked(path: String, sessionId: String, now: Long, recordHistory: Boolean = true): Boolean {
+        var changed = false
+        val lock = locks[path] ?: return false
+        if (lock.writer?.sessionId == sessionId) {
+            lock.writer = null
+            if (recordHistory) recent[path] = FileView(path, LockMode.WRITE, listOf(sessionId), lock.startedAt, now)
+            changed = true
+        }
+        if (lock.readers.remove(sessionId) != null) changed = true
+        if (lock.writer == null && lock.readers.isEmpty()) locks.remove(path)
         return changed
     }
 

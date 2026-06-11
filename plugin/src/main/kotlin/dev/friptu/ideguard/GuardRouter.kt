@@ -7,6 +7,8 @@ package dev.friptu.ideguard
 class GuardRouter(
     private val state: GuardState,
     private val dirtyChecker: DirtyChecker,
+    private val bashEnabled: () -> Boolean = { true },
+    private val projectRoots: () -> List<String> = { emptyList() },
     private val clock: () -> Long,
 ) {
     data class Result(val status: Int, val body: String)
@@ -48,5 +50,54 @@ class GuardRouter(
         }
         state.release(path, sessionId, clock())
         return Result(200, """{"ok":true}""")
+    }
+
+    /** `POST /acquire-bash {command, cwd, sessionId}`. */
+    fun acquireBash(body: String): Result {
+        val obj = MiniJson.parseFlatObject(body)
+        val command = obj["command"]
+        val cwd = obj["cwd"]
+        val sessionId = obj["sessionId"]
+        if (command.isNullOrBlank() || sessionId.isNullOrBlank()) {
+            return Result(400, MiniJson.obj("granted" to "false", "error" to "command, sessionId required"))
+        }
+        if (!bashEnabled()) return Result(200, """{"granted":true,"dirty":false}""")
+
+        val parsed = BashCommandParser.parse(command, cwd, System.getProperty("user.home"))
+        val accesses = parsed.filter { withinRoots(it.path) }
+        val res = state.acquireSet(accesses, sessionId, clock())
+        val dirty = res.granted && accesses.any { a ->
+            a.mode == LockMode.WRITE && runCatching { dirtyChecker.isDirty(a.path) }.getOrDefault(false)
+        }
+        val parts = mutableListOf("\"granted\":${res.granted}", "\"dirty\":$dirty")
+        res.heldBy?.let { parts.add("\"heldBy\":\"${MiniJson.escape(it)}\"") }
+        res.heldMode?.let { parts.add("\"heldMode\":\"${it.name.lowercase()}\"") }
+        return Result(200, parts.joinToString(prefix = "{", postfix = "}", separator = ","))
+    }
+
+    /** `POST /release-bash {command, cwd, sessionId}`. Re-parses to free the same set. */
+    fun releaseBash(body: String): Result {
+        val obj = MiniJson.parseFlatObject(body)
+        val command = obj["command"]
+        val cwd = obj["cwd"]
+        val sessionId = obj["sessionId"]
+        if (command.isNullOrBlank() || sessionId.isNullOrBlank()) {
+            return Result(400, MiniJson.obj("ok" to "false", "error" to "command, sessionId required"))
+        }
+        if (bashEnabled()) {
+            val parsed = BashCommandParser.parse(command, cwd, System.getProperty("user.home"))
+            val paths = parsed.filter { withinRoots(it.path) }.map { it.path }
+            state.releaseSet(paths, sessionId, clock())
+        }
+        return Result(200, """{"ok":true}""")
+    }
+
+    /** True if [path] is inside any open project root. With no roots, nothing matches. */
+    private fun withinRoots(path: String): Boolean {
+        val roots = projectRoots()
+        return roots.any { root ->
+            val r = if (root.endsWith("/")) root else "$root/"
+            path == root || path.startsWith(r)
+        }
     }
 }

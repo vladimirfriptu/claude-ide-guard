@@ -13,6 +13,9 @@ data class AcquireResult(
     val heldMode: LockMode? = null,
 )
 
+/** One file touched by a Bash command, with the access mode it implies. */
+data class FileAccess(val path: String, val mode: LockMode)
+
 /**
  * Derived view of one path for the UI. [mode] is WRITE when a writer holds or
  * recently held it, else READ. [endedAt] null means active (in flight).

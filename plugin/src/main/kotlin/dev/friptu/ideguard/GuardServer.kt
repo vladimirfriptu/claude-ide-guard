@@ -4,6 +4,7 @@ import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.logger
+import com.intellij.openapi.project.ProjectManager
 import com.intellij.util.concurrency.AppExecutorUtil
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
@@ -37,7 +38,12 @@ class GuardServer : Disposable {
         get() = ApplicationManager.getApplication().getService(GuardState::class.java)
 
     private val router: GuardRouter by lazy {
-        GuardRouter(state, PlatformDirtyChecker(), System::currentTimeMillis)
+        GuardRouter(
+            state,
+            PlatformDirtyChecker(),
+            { GuardSettings.getInstance().bashDetectionEnabled },
+            { ProjectManager.getInstance().openProjects.mapNotNull { it.basePath } },
+        ) { System.currentTimeMillis() }
     }
 
     /** Starts the server (idempotent) plus the one-time sweep + UI wiring. */
@@ -83,6 +89,8 @@ class GuardServer : Disposable {
             httpServer.createContext("/health") { ex -> dispatch(ex) { router.health() } }
             httpServer.createContext("/acquire") { ex -> dispatch(ex) { router.acquire(readBody(ex)) } }
             httpServer.createContext("/release") { ex -> dispatch(ex) { router.release(readBody(ex)) } }
+            httpServer.createContext("/acquire-bash") { ex -> dispatch(ex) { router.acquireBash(readBody(ex)) } }
+            httpServer.createContext("/release-bash") { ex -> dispatch(ex) { router.releaseBash(readBody(ex)) } }
 
             val pool = Executors.newFixedThreadPool(4) { r ->
                 Thread(r, "claude-ide-guard-http").apply { isDaemon = true }
