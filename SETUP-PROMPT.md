@@ -22,17 +22,33 @@ BUILD THE PLUGIN
    `build/distributions/claude-ide-guard-*.zip`.
 
 INSTALL THE HOOKS (into ~/.claude)
-4. `mkdir -p ~/.claude/hooks` and copy `hooks/ide-guard-pre.sh` and
-   `hooks/ide-guard-post.sh` there, then `chmod +x` both.
+4. Create the hooks directory and copy all three hook scripts:
+   ```
+   mkdir -p ~/.claude/hooks
+   cp hooks/ide-guard-write-pre.sh hooks/ide-guard-read-pre.sh hooks/ide-guard-post.sh ~/.claude/hooks/
+   chmod +x ~/.claude/hooks/ide-guard-write-pre.sh \
+            ~/.claude/hooks/ide-guard-read-pre.sh \
+            ~/.claude/hooks/ide-guard-post.sh
+   ```
 5. Register the hooks in `~/.claude/settings.json`:
-   - If the file does not exist, copy `hooks/settings.snippet.json` to it.
-   - If it exists, FIRST back it up to `~/.claude/settings.json.bak`, then
-     deep-merge the snippet with jq:
-     `jq -s '.[0] * .[1]' ~/.claude/settings.json hooks/settings.snippet.json > tmp && mv tmp ~/.claude/settings.json`
-   - IMPORTANT: jq's `*` replaces arrays. If I already have `PreToolUse` or
-     `PostToolUse` hooks, do NOT clobber them — instead append the two entries
-     from `hooks/settings.snippet.json` to my existing arrays. Verify with
-     `jq '.hooks | keys' ~/.claude/settings.json` that nothing I had was lost.
+   - If the file does not exist, copy `hooks/settings.snippet.json` to it:
+     `cp hooks/settings.snippet.json ~/.claude/settings.json`
+   - If it exists, FIRST back it up:
+     `cp ~/.claude/settings.json ~/.claude/settings.json.bak`
+     Then check whether it already has PreToolUse or PostToolUse entries:
+     `jq '.hooks | keys' ~/.claude/settings.json`
+   - If there are NO existing PreToolUse/PostToolUse entries, merge safely:
+     `jq -s '.[0] * .[1]' ~/.claude/settings.json hooks/settings.snippet.json > /tmp/settings_merged.json && mv /tmp/settings_merged.json ~/.claude/settings.json`
+   - If PreToolUse or PostToolUse entries ALREADY EXIST, do NOT clobber them.
+     Instead, append each of the three new hook entries from
+     `hooks/settings.snippet.json` to the existing arrays by hand using jq:
+     - Append write-pre to PreToolUse:
+       `jq '.hooks.PreToolUse += [{"matcher":"Edit|Write|MultiEdit|NotebookEdit","hooks":[{"type":"command","command":"~/.claude/hooks/ide-guard-write-pre.sh"}]}]' ~/.claude/settings.json > /tmp/s.json && mv /tmp/s.json ~/.claude/settings.json`
+     - Append read-pre to PreToolUse:
+       `jq '.hooks.PreToolUse += [{"matcher":"Read","hooks":[{"type":"command","command":"~/.claude/hooks/ide-guard-read-pre.sh"}]}]' ~/.claude/settings.json > /tmp/s.json && mv /tmp/s.json ~/.claude/settings.json`
+     - Append post to PostToolUse:
+       `jq '.hooks.PostToolUse += [{"matcher":"Edit|Write|MultiEdit|NotebookEdit|Read","hooks":[{"type":"command","command":"~/.claude/hooks/ide-guard-post.sh"}]}]' ~/.claude/settings.json > /tmp/s.json && mv /tmp/s.json ~/.claude/settings.json`
+   - Verify nothing was lost: `jq '.hooks | keys' ~/.claude/settings.json`
 
 VERIFY
 6. Print a short checklist of what you did, then tell me the remaining
@@ -40,8 +56,9 @@ VERIFY
    - In WebStorm: Settings -> Plugins -> gear -> Install Plugin from Disk ->
      pick the zip from step 3, then restart WebStorm and open a project.
    - Start a fresh Claude Code session so the new hooks load.
-   - Test: ask Claude to edit a file in that project and watch WebStorm light
-     up the file (tab/Project-view icon + "Claude Edits" tool window).
+   - Test: ask Claude to read or edit a file in that project and watch WebStorm
+     light up the file (eye for read, pencil for write, in tab/Project-view
+     icon + "Claude Edits" tool window).
 
 Do not attempt to install the plugin into WebStorm yourself or launch its GUI —
 those steps are mine. Keep everything fail-open: if anything is uncertain,

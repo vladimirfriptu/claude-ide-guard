@@ -1,83 +1,63 @@
 package dev.friptu.ideguard
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class GuardRouterTest {
 
-    private fun router(
-        state: GuardState = GuardState(),
-        dirty: Set<String> = emptySet(),
-        now: Long = 1000,
-    ): Pair<GuardRouter, GuardState> {
-        val checker = DirtyChecker { path -> path in dirty }
+    private fun router(dirty: Set<String> = emptySet(), now: Long = 1000): Pair<GuardRouter, GuardState> {
+        val state = GuardState()
+        val checker = DirtyChecker { it in dirty }
         return GuardRouter(state, checker) { now } to state
     }
 
     @Test
-    fun healthIsOk() {
+    fun healthOk() {
         val (r, _) = router()
         assertEquals(200, r.health().status)
         assertTrue(r.health().body.contains("\"ok\":true"))
     }
 
     @Test
-    fun editingStartRegistersInState() {
+    fun acquireWriteGrantedAndRegistersHolder() {
         val (r, state) = router()
-        val res = r.editing("""{"path":"/a.ts","action":"start","sessionId":"s1"}""")
+        val res = r.acquire("""{"path":"/a","sessionId":"s1","mode":"write"}""")
         assertEquals(200, res.status)
-        assertTrue(state.isInFlight("/a.ts"))
+        assertTrue(res.body.contains("\"granted\":true"))
+        assertTrue(state.isInFlight("/a"))
+        assertEquals(LockMode.WRITE, state.modeOf("/a"))
     }
 
     @Test
-    fun editingEndClearsState() {
+    fun acquireWriteDeniedWhenHeldByOther() {
         val (r, state) = router()
-        r.editing("""{"path":"/a.ts","action":"start","sessionId":"s1"}""")
-        r.editing("""{"path":"/a.ts","action":"end","sessionId":"s1"}""")
-        assertFalse(state.isInFlight("/a.ts"))
+        r.acquire("""{"path":"/a","sessionId":"s1","mode":"write"}""")
+        val res = r.acquire("""{"path":"/a","sessionId":"s2","mode":"write"}""")
+        assertTrue(res.body.contains("\"granted\":false"))
+        assertTrue(res.body.contains("\"heldBy\":\"s1\""))
     }
 
     @Test
-    fun editingRejectsMissingFields() {
-        val (r, _) = router()
-        assertEquals(400, r.editing("""{"action":"start"}""").status)
-        assertEquals(400, r.editing("""{"path":"/a.ts"}""").status)
+    fun acquireReportsDirtyForWrite() {
+        val (r, _) = router(dirty = setOf("/a"))
+        val res = r.acquire("""{"path":"/a","sessionId":"s1","mode":"write"}""")
+        assertTrue(res.body.contains("\"dirty\":true"))
     }
 
     @Test
-    fun editingRejectsUnknownAction() {
-        val (r, _) = router()
-        assertEquals(400, r.editing("""{"path":"/a.ts","action":"frobnicate"}""").status)
-    }
-
-    @Test
-    fun checkReturnsAskOnlyForDirtyFile() {
-        val (r, _) = router(dirty = setOf("/dirty.ts"))
-
-        val dirtyRes = r.check("/dirty.ts")
-        assertEquals(200, dirtyRes.status)
-        assertTrue(dirtyRes.body.contains("\"decision\":\"ask\""))
-
-        val cleanRes = r.check("/clean.ts")
-        assertEquals(200, cleanRes.status)
-        assertTrue(cleanRes.body.contains("\"decision\":\"allow\""))
-    }
-
-    @Test
-    fun checkAllowsWhenPathMissing() {
-        val (r, _) = router()
-        val res = r.check(null)
-        assertTrue(res.body.contains("\"decision\":\"allow\""))
-    }
-
-    @Test
-    fun checkFailsOpenWhenCheckerThrows() {
-        val throwing = DirtyChecker { error("boom") }
-        val r = GuardRouter(GuardState(), throwing) { 1000 }
-        val res = r.check("/a.ts")
+    fun releaseFreesLock() {
+        val (r, state) = router()
+        r.acquire("""{"path":"/a","sessionId":"s1","mode":"write"}""")
+        val res = r.release("""{"path":"/a","sessionId":"s1"}""")
         assertEquals(200, res.status)
-        assertTrue(res.body.contains("\"decision\":\"allow\""))
+        assertTrue(res.body.contains("\"ok\":true"))
+    }
+
+    @Test
+    fun acquireRejectsBadInput() {
+        val (r, _) = router()
+        assertEquals(400, r.acquire("""{"path":"/a"}""").status)         // no mode/session
+        assertEquals(400, r.acquire("""{"sessionId":"s1","mode":"read"}""").status) // no path
     }
 }

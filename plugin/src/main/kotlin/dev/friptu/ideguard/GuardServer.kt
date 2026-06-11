@@ -10,7 +10,6 @@ import com.sun.net.httpserver.HttpServer
 import java.io.IOException
 import java.net.InetAddress
 import java.net.InetSocketAddress
-import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -48,20 +47,33 @@ class GuardServer : Disposable {
             GuardUiRefresher.install(state)
             GuardEditorLocker.install(state)
             sweepFuture = AppExecutorUtil.getAppScheduledExecutorService().scheduleWithFixedDelay(
-                { runCatching { state.sweep(System.currentTimeMillis(), TTL_MILLIS) } },
+                {
+                    runCatching {
+                        val lease = GuardSettings.getInstance().lockLeaseSeconds * 1000L
+                        state.sweep(System.currentTimeMillis(), lease, RECENT_TTL_MILLIS)
+                    }
+                },
                 SWEEP_INTERVAL_SEC, SWEEP_INTERVAL_SEC, TimeUnit.SECONDS,
             )
             initialized = true
         }
-        startHttp(GuardSettings.getInstance().port)
+        startHttp(resolvePort())
     }
 
     /** Rebinds the HTTP server to the currently configured port. */
     @Synchronized
     fun restart() {
         stopHttp()
-        startHttp(GuardSettings.getInstance().port)
+        startHttp(resolvePort())
     }
+
+    /**
+     * The `claude.ide.guard.port` system property wins over the persisted
+     * setting. The sandbox passes it so it never collides with a production
+     * instance already holding the default port.
+     */
+    private fun resolvePort(): Int =
+        System.getProperty(PORT_PROPERTY)?.toIntOrNull() ?: GuardSettings.getInstance().port
 
     private fun startHttp(port: Int) {
         if (server != null) return
@@ -69,8 +81,8 @@ class GuardServer : Disposable {
             val loopback = InetAddress.getByName("127.0.0.1")
             val httpServer = HttpServer.create(InetSocketAddress(loopback, port), 0)
             httpServer.createContext("/health") { ex -> dispatch(ex) { router.health() } }
-            httpServer.createContext("/editing") { ex -> dispatch(ex) { router.editing(readBody(ex)) } }
-            httpServer.createContext("/check") { ex -> dispatch(ex) { router.check(queryParam(ex, "path")) } }
+            httpServer.createContext("/acquire") { ex -> dispatch(ex) { router.acquire(readBody(ex)) } }
+            httpServer.createContext("/release") { ex -> dispatch(ex) { router.release(readBody(ex)) } }
 
             val pool = Executors.newFixedThreadPool(4) { r ->
                 Thread(r, "claude-ide-guard-http").apply { isDaemon = true }
@@ -108,18 +120,6 @@ class GuardServer : Disposable {
     private fun readBody(exchange: HttpExchange): String =
         exchange.requestBody.readBytes().toString(StandardCharsets.UTF_8)
 
-    private fun queryParam(exchange: HttpExchange, name: String): String? {
-        val query = exchange.requestURI.rawQuery ?: return null
-        for (pair in query.split('&')) {
-            val eq = pair.indexOf('=')
-            if (eq < 0) continue
-            if (pair.substring(0, eq) == name) {
-                return URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8)
-            }
-        }
-        return null
-    }
-
     override fun dispose() {
         sweepFuture?.cancel(true)
         sweepFuture = null
@@ -128,7 +128,8 @@ class GuardServer : Disposable {
 
     companion object {
         const val DEFAULT_PORT = 7337
-        const val TTL_MILLIS = 60_000L
+        const val PORT_PROPERTY = "claude.ide.guard.port"
+        const val RECENT_TTL_MILLIS = 15 * 60_000L
         const val SWEEP_INTERVAL_SEC = 15L
 
         fun respondJson(exchange: HttpExchange, status: Int, body: String) {

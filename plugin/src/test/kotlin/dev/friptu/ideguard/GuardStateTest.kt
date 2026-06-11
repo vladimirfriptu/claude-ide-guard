@@ -2,6 +2,7 @@ package dev.friptu.ideguard
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.atomic.AtomicInteger
@@ -9,70 +10,95 @@ import java.util.concurrent.atomic.AtomicInteger
 class GuardStateTest {
 
     @Test
-    fun startAddsEntryAndEndRemovesIt() {
+    fun readsShareWriteIsExclusive() {
         val s = GuardState()
-        s.start("/a.ts", "sess1", now = 1000)
-        assertTrue(s.isInFlight("/a.ts"))
-        assertEquals(1, s.snapshot().size)
+        assertTrue(s.acquire("/a", "s1", LockMode.READ, now = 10).granted)
+        // second reader allowed
+        assertTrue(s.acquire("/a", "s2", LockMode.READ, now = 11).granted)
+        // writer blocked by readers
+        val w = s.acquire("/a", "s3", LockMode.WRITE, now = 12)
+        assertFalse(w.granted)
+        assertEquals(LockMode.READ, w.heldMode)
+    }
 
-        assertTrue(s.end("/a.ts"))
-        assertFalse(s.isInFlight("/a.ts"))
+    @Test
+    fun writerBlocksOtherReadersAndWriters() {
+        val s = GuardState()
+        assertTrue(s.acquire("/a", "s1", LockMode.WRITE, now = 10).granted)
+        assertFalse(s.acquire("/a", "s2", LockMode.READ, now = 11).granted)
+        val w = s.acquire("/a", "s2", LockMode.WRITE, now = 12)
+        assertFalse(w.granted)
+        assertEquals("s1", w.heldBy)
+        assertEquals(LockMode.WRITE, w.heldMode)
+    }
+
+    @Test
+    fun sameSessionNeverBlocksItself() {
+        val s = GuardState()
+        assertTrue(s.acquire("/a", "s1", LockMode.READ, now = 10).granted)
+        // same session upgrades to write even though it holds a read
+        assertTrue(s.acquire("/a", "s1", LockMode.WRITE, now = 11).granted)
+        // re-acquire write by same session refreshes, still granted
+        assertTrue(s.acquire("/a", "s1", LockMode.WRITE, now = 12).granted)
+    }
+
+    @Test
+    fun releaseFreesTheLock() {
+        val s = GuardState()
+        s.acquire("/a", "s1", LockMode.WRITE, now = 10)
+        s.release("/a", "s1", now = 20)
+        assertTrue(s.acquire("/a", "s2", LockMode.WRITE, now = 21).granted)
+    }
+
+    @Test
+    fun writeReleaseLingersAsRecentReadReleaseDoesNot() {
+        val s = GuardState()
+        s.acquire("/w", "s1", LockMode.WRITE, now = 10)
+        s.release("/w", "s1", now = 20)
+        s.acquire("/r", "s1", LockMode.READ, now = 10)
+        s.release("/r", "s1", now = 20)
+
+        val views = s.snapshot()
+        val w = views.first { it.path == "/w" }
+        assertFalse(w.isActive)
+        assertEquals(LockMode.WRITE, w.mode)
+        assertNull(views.firstOrNull { it.path == "/r" }) // read leaves nothing behind
+    }
+
+    @Test
+    fun isInFlightAndModeReflectHolders() {
+        val s = GuardState()
+        assertFalse(s.isInFlight("/a"))
+        s.acquire("/a", "s1", LockMode.READ, now = 10)
+        assertTrue(s.isInFlight("/a"))
+        assertEquals(LockMode.READ, s.modeOf("/a"))
+        s.acquire("/a", "s1", LockMode.WRITE, now = 11)
+        assertEquals(LockMode.WRITE, s.modeOf("/a"))
+        s.release("/a", "s1", now = 12)
+        assertFalse(s.isInFlight("/a"))
+    }
+
+    @Test
+    fun sweepFreesStaleHoldersThenExpiresRecent() {
+        val s = GuardState()
+        s.acquire("/a", "s1", LockMode.WRITE, now = 1_000)
+        // lease 30s; at 40s the holder is stale -> released (and recorded recent)
+        s.sweep(now = 40_000, leaseMillis = 30_000, recentTtlMillis = 1_000_000)
+        assertFalse(s.isInFlight("/a"))
+        assertTrue(s.snapshot().any { it.path == "/a" && !it.isActive })
+        // recent TTL 10s; far in the future -> removed
+        s.sweep(now = 2_000_000, leaseMillis = 30_000, recentTtlMillis = 10_000)
         assertTrue(s.snapshot().isEmpty())
     }
 
     @Test
-    fun startIsIdempotentAndRefreshesLastSeen() {
-        val s = GuardState()
-        s.start("/a.ts", "sess1", now = 1000)
-        s.start("/a.ts", "sess1", now = 5000)
-        val entries = s.snapshot()
-        assertEquals(1, entries.size)
-        assertEquals(1000, entries[0].startedAt)   // preserved
-        assertEquals(5000, entries[0].lastSeen)     // refreshed
-    }
-
-    @Test
-    fun endIsIdempotent() {
-        val s = GuardState()
-        s.start("/a.ts", null, now = 1000)
-        assertTrue(s.end("/a.ts"))
-        assertFalse(s.end("/a.ts"))  // second end is a safe no-op
-    }
-
-    @Test
-    fun sweepRemovesOnlyStaleEntries() {
-        val s = GuardState()
-        s.start("/fresh.ts", null, now = 40_000)
-        s.start("/stale.ts", null, now = 1_000)
-
-        // now = 50_000, ttl = 30_000 → stale (age 49_000) expires, fresh (age 10_000) stays
-        val removed = s.sweep(now = 50_000, ttlMillis = 30_000)
-
-        assertEquals(listOf("/stale.ts"), removed)
-        assertTrue(s.isInFlight("/fresh.ts"))
-        assertFalse(s.isInFlight("/stale.ts"))
-    }
-
-    @Test
-    fun sweepWithNothingStaleReturnsEmpty() {
-        val s = GuardState()
-        s.start("/a.ts", null, now = 10_000)
-        assertTrue(s.sweep(now = 20_000, ttlMillis = 30_000).isEmpty())
-        assertTrue(s.isInFlight("/a.ts"))
-    }
-
-    @Test
-    fun listenerFiresOnStartEndAndSweep() {
+    fun listenerFiresOnChange() {
         val s = GuardState()
         val calls = AtomicInteger(0)
         s.addListener { calls.incrementAndGet() }
-
-        s.start("/a.ts", null, now = 1000)   // +1
-        s.end("/a.ts")                        // +1
-        s.end("/a.ts")                        // no-op, no fire
-        s.start("/b.ts", null, now = 1000)   // +1
-        s.sweep(now = 100_000, ttlMillis = 10) // +1
-
-        assertEquals(4, calls.get())
+        s.acquire("/a", "s1", LockMode.READ, now = 10)   // +1
+        s.acquire("/a", "s1", LockMode.READ, now = 11)   // refresh -> still fires (+1)
+        s.release("/a", "s1", now = 12)                  // +1
+        assertTrue(calls.get() >= 3)
     }
 }

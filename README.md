@@ -1,33 +1,48 @@
 # claude-ide-guard
 
-A WebStorm/JetBrains plugin + Claude Code hooks that make a parallel-editing
-Claude Code agent **visible** in your IDE and **guard** against overwriting your
-unsaved work.
+A WebStorm/JetBrains plugin + Claude Code hooks that coordinate parallel Claude
+Code agents around file access and make in-flight activity **visible** in your
+IDE.
 
-Two channels:
+Three channels:
 
-- **Channel B — visibility (primary).** While Claude is touching a file, that
-  file lights up in WebStorm: editor **tab color**, **Project view** badge, and
-  a **"Claude Edits" tool window** list.
-- **Channel A — soft guard (secondary).** Before Claude edits a file that has
-  **unsaved (dirty)** changes in the IDE, the hook asks you to confirm. Saved
-  files are never gated — they only get the highlight.
-
-The agent is **never blocked** by this tool. If the plugin is off, unreachable,
-or errors out, the hooks fail open (allow) with a tiny timeout.
+- **Readers-writer lock (primary).** Before touching a file, a hook acquires a
+  shared READ lock (for `Read`) or an exclusive WRITE lock (for
+  `Edit|Write|MultiEdit|NotebookEdit`). A second agent that needs conflicting
+  access waits (polling) until the first releases, or proceeds after a
+  configurable timeout — **fail open, never blocking Claude permanently**.
+- **Visibility.** While a lock is held, the file lights up: editor **tab icon**
+  (pencil = write, eye = read), **Project view** badge, and a **"Claude Edits"
+  tool window** list.
+- **Dirty guard.** When a write lock is acquired on a file that has **unsaved
+  changes** in the IDE, the hook pauses and asks you to confirm before
+  overwriting.
 
 ## How it works
 
 ```
-Claude Code  ──PreToolUse hook──▶  POST /editing {start}   ──▶  plugin lights indicators
-                                   GET  /check?path=...     ──▶  dirty? → "ask" : "allow"
-Claude Code  ──PostToolUse hook─▶  POST /editing {end}      ──▶  plugin clears indicators
+Agent A  ──PreToolUse hook──▶  POST /acquire {path, sessionId, mode:"write"}
+                                      ┌─ granted:true  → tool runs
+                                      └─ granted:false → poll until granted or timeout → allow
+Agent A  ──PostToolUse hook─▶  POST /release {path, sessionId}  →  lock freed
+
+Agent B  ──PreToolUse hook──▶  POST /acquire {path, sessionId, mode:"read"}
+                                      └─ multiple readers allowed simultaneously
 ```
 
-The plugin runs a single **application-level** HTTP server on `127.0.0.1:7337`
-(configurable). State lives **in memory only** — no files on disk, so it can
-never cause a write-write conflict. Stale entries (e.g. a killed session) expire
-via a TTL sweep.
+**Readers-writer semantics:**
+- Multiple agents may hold READ on the same path simultaneously.
+- A WRITE holder blocks all other readers and writers on that path.
+- The same session never blocks itself (safe re-entrance, self-upgrade).
+
+**Cross-agent coordination** works because a single plugin instance owns the
+server port. Every agent that connects to that port sees the same lock table
+— the arbiter is the IDE process that opened the project first.
+
+**Icons:** pencil (✎) = active write, eye (👁) = active read.
+
+The agent is **never permanently blocked**. If the plugin is off, unreachable,
+or the wait timeout expires, the hooks fail open (allow) immediately.
 
 ## Repository layout
 
@@ -80,18 +95,59 @@ curl -s 127.0.0.1:7337/health           # → {"ok":true}
 > [SETUP-PROMPT.md](SETUP-PROMPT.md) into a Claude Code session opened in this
 > repo and it will build the plugin and install the hooks for you.
 
+## HTTP Contract
+
+The plugin exposes a loopback HTTP server on `127.0.0.1:7337` (configurable).
+
+### `POST /acquire`
+
+Request body:
+```json
+{ "path": "/abs/path/to/file", "sessionId": "agent-uuid", "mode": "write" }
+```
+`mode` is `"read"` or `"write"`.
+
+Response:
+```json
+{ "granted": true,  "dirty": false }
+{ "granted": false, "dirty": false, "heldBy": "other-session-id", "heldMode": "write" }
+```
+
+- `dirty` is `true` when `mode=write` and the file has unsaved changes in the
+  IDE. The write-pre hook surfaces this as a confirmation prompt.
+- `heldBy` / `heldMode` are present only when `granted:false`.
+
+### `POST /release`
+
+Request body:
+```json
+{ "path": "/abs/path/to/file", "sessionId": "agent-uuid" }
+```
+
+Response:
+```json
+{ "ok": true }
+```
+
+### `GET /health`
+
+```json
+{ "ok": true }
+```
+
 ## Connect Claude Code (install the hooks)
 
-Claude Code talks to the plugin through two hooks on the
-`Edit|Write|MultiEdit|NotebookEdit` tools. Both fail open, so a broken setup
-silently allows edits — it never blocks Claude.
+Claude Code talks to the plugin through three hooks. All fail open, so a broken
+setup silently allows the tool — Claude is never permanently blocked.
 
 ### 1. Copy the hook scripts
 
 ```sh
 mkdir -p ~/.claude/hooks
-cp hooks/ide-guard-pre.sh hooks/ide-guard-post.sh ~/.claude/hooks/
-chmod +x ~/.claude/hooks/ide-guard-pre.sh ~/.claude/hooks/ide-guard-post.sh
+cp hooks/ide-guard-write-pre.sh hooks/ide-guard-read-pre.sh hooks/ide-guard-post.sh ~/.claude/hooks/
+chmod +x ~/.claude/hooks/ide-guard-write-pre.sh \
+         ~/.claude/hooks/ide-guard-read-pre.sh \
+         ~/.claude/hooks/ide-guard-post.sh
 ```
 
 ### 2. Register them in `~/.claude/settings.json`
@@ -102,8 +158,7 @@ If you have **no** `settings.json` yet, just copy the sample:
 cp hooks/settings.snippet.json ~/.claude/settings.json
 ```
 
-If you **already have** a `settings.json`, merge the hooks in with `jq` (backup
-first):
+If you **already have** a `settings.json` with no existing hooks, merge:
 
 ```sh
 cp ~/.claude/settings.json ~/.claude/settings.json.bak
@@ -111,10 +166,18 @@ jq -s '.[0] * .[1]' ~/.claude/settings.json hooks/settings.snippet.json \
   > ~/.claude/settings.json.tmp && mv ~/.claude/settings.json.tmp ~/.claude/settings.json
 ```
 
-> Note: `*` deep-merges objects but **replaces** arrays. If you already have
-> `PreToolUse`/`PostToolUse` hooks, the merge overwrites them — in that case add
-> the two entries from `hooks/settings.snippet.json` to your existing arrays by
-> hand instead.
+> **Note:** `jq *` deep-merges objects but **replaces** arrays. If you already
+> have `PreToolUse`/`PostToolUse` entries, append the three entries from
+> `hooks/settings.snippet.json` to your existing arrays by hand so nothing is
+> lost.
+
+The snippet registers:
+
+| Event | Matcher | Hook |
+|---|---|---|
+| PreToolUse | `Edit\|Write\|MultiEdit\|NotebookEdit` | `ide-guard-write-pre.sh` |
+| PreToolUse | `Read` | `ide-guard-read-pre.sh` |
+| PostToolUse | `Edit\|Write\|MultiEdit\|NotebookEdit\|Read` | `ide-guard-post.sh` |
 
 ### 3. Reload Claude Code
 
@@ -123,20 +186,32 @@ Start a new Claude Code session (or run `/hooks` to confirm they're picked up).
 ### 4. Verify end to end
 
 1. Open the project in WebStorm (plugin running, a project open).
-2. In a Claude Code session **inside that project**, ask Claude to edit a file.
-3. Watch WebStorm: the file's tab/Project-view icon becomes the Claude mark and
-   it appears in the **Claude Edits** tool window while the edit runs, then
-   clears.
+2. In a Claude Code session **inside that project**, ask Claude to read or edit
+   a file.
+3. Watch WebStorm: the file's tab/Project-view icon becomes the eye (read) or
+   pencil (write) mark and it appears in the **Claude Edits** tool window while
+   the operation runs, then clears.
 4. Make an unsaved change to a file, then ask Claude to edit that same file —
    Claude should pause and ask for confirmation (the dirty guard).
 
-### Non-default port
+### Environment variables
 
-If you changed the plugin's port, set the same value for the hooks, e.g. in
-`~/.claude/settings.json` `env`, or export it where Claude Code runs:
+| Variable | Default | Description |
+|---|---|---|
+| `CLAUDE_IDE_GUARD_PORT` | `7337` | Port the plugin listens on. |
+| `CLAUDE_IDE_GUARD_WAIT_SECONDS` | `10` | How long a hook polls before giving up and allowing. |
+| `CLAUDE_IDE_GUARD_POLL_MS` | `200` | Interval between polling attempts (milliseconds). |
 
-```sh
-export CLAUDE_IDE_GUARD_PORT=7338
+Set them in your shell profile or in the `env` section of `~/.claude/settings.json`:
+
+```json
+{
+  "env": {
+    "CLAUDE_IDE_GUARD_PORT": "7337",
+    "CLAUDE_IDE_GUARD_WAIT_SECONDS": "10",
+    "CLAUDE_IDE_GUARD_POLL_MS": "200"
+  }
+}
 ```
 
 ## Settings
@@ -145,10 +220,14 @@ export CLAUDE_IDE_GUARD_PORT=7338
 
 - **HTTP server port** (default `7337`). Changes apply immediately (the server
   rebinds). Loopback only.
-- **Lock editor while Claude is editing** (default off). When on, an in-flight
-  file's editor is made read-only so you can't type into a file Claude is
-  writing. Only your in-IDE typing is blocked — Claude's on-disk writes are
-  unaffected. Auto-unlocks when the edit finishes or the TTL expires.
+- **Lock editor while Claude is editing** (default off). When on, any file that
+  is actively locked (read or write) is made read-only in the editor so you
+  can't type into it. Only your in-IDE typing is blocked — Claude's on-disk
+  writes are unaffected. Auto-unlocks when the lock is released or the lease
+  expires.
+- **Lock lease (sec)** (default `300`). How long a held lock survives without a
+  refresh before it is force-released by the sweep. This protects against
+  orphaned locks left by a killed or crashed agent session.
 
 ## Troubleshooting
 
@@ -157,13 +236,28 @@ export CLAUDE_IDE_GUARD_PORT=7338
   `claude-ide-guard`.
 - **Port already in use** — change the port in Settings (and in the hook env).
   The plugin logs a warning and disables itself rather than crashing.
-- **Indicators stuck on a file** — they self-clear via the TTL sweep
-  (~60 s without a refresh). Editing the file again also re-syncs.
+- **Indicators stuck on a file** — locks self-clear after the lease expires
+  (default 5 min). Editing the file again also re-syncs.
+- **Hook seems to wait a long time** — another agent holds a conflicting lock.
+  The hook polls until the lock is granted or `CLAUDE_IDE_GUARD_WAIT_SECONDS`
+  elapses, then fails open (allows). Increase the timeout if you expect long
+  operations; reduce it if you prefer faster fail-open.
 - **Hooks seem to do nothing** — verify `jq`/`curl` are installed and the hook
   paths in `settings.json` are correct. Hooks fail open by design, so a
   misconfiguration silently allows edits (never blocks Claude).
+- **Multi-process projects** — if you have more than one IDE instance open, each
+  owns its lock table independently. Only agents connected to the same port
+  (same IDE process) coordinate with each other. Agents talking to different
+  IDE instances have no visibility into each other's locks.
+
+## Known limitation
+
+Bash-based reads and writes (`cat`, `>`, `sed -i`, etc.) currently bypass the
+hooks — the hooks only fire for Claude Code's built-in file tools (`Read`,
+`Edit`, `Write`, `MultiEdit`, `NotebookEdit`). Coordinating shell commands is
+planned as a follow-up.
 
 ## Out of scope (MVP)
 
-MCP server for conversational queries; gating on saved/active files; token auth;
-non-JetBrains editors. See the project spec for the phase-2 notes.
+MCP server for conversational queries; token auth; non-JetBrains editors. See
+the project spec for the phase-2 notes.

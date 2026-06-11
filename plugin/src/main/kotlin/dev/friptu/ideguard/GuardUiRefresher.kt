@@ -4,6 +4,7 @@ import com.intellij.ide.projectView.ProjectView
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.fileEditor.ex.FileEditorManagerEx
 import com.intellij.openapi.project.ProjectManager
+import com.intellij.ui.IconDeferrer
 
 /**
  * Bridges [GuardState] changes (fired off any thread) to UI repaints on the
@@ -20,6 +21,10 @@ object GuardUiRefresher {
     private fun refreshAll() {
         val app = ApplicationManager.getApplication()
         app.invokeLater {
+            // File icons (tab + Project view) are served from a deferred cache
+            // keyed by PSI mod count, which our lock changes don't bump — clear
+            // it so eye/axe badges appear and disappear promptly everywhere.
+            IconDeferrer.getInstance().clearCache()
             for (project in ProjectManager.getInstance().openProjects) {
                 if (project.isDisposed) continue
                 FileEditorManagerEx.getInstanceEx(project).refreshIcons()
