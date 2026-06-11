@@ -1,0 +1,13 @@
+# Gradle / build output
+plugin/.gradle/
+plugin/.kotlin/
+plugin/build/
+plugin/.intellijPlatform/
+
+# IDE / AI tooling config (not part of the project)
+.idea/
+*.iml
+.claude/
+
+# OS noise
+.DS_Store

@@ -1,0 +1,40 @@
+<idea-plugin>
+    <id>dev.friptu.claude-ide-guard</id>
+    <name>Claude IDE Guard</name>
+    <vendor email="vladimirfriptu@gmail.com">friptu</vendor>
+
+    <description><![CDATA[
+        Shows which files a Claude Code agent is currently editing (tab color,
+        Project view badge, tool window) and asks for confirmation before the
+        agent overwrites a file with unsaved changes in the IDE.
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <applicationService serviceImplementation="dev.friptu.ideguard.GuardServer"/>
+        <applicationService serviceImplementation="dev.friptu.ideguard.GuardState"/>
+        <applicationService serviceImplementation="dev.friptu.ideguard.GuardSettings"/>
+
+        <postStartupActivity implementation="dev.friptu.ideguard.GuardStartup"/>
+
+        <editorTabColorProvider implementation="dev.friptu.ideguard.GuardTabColorProvider"/>
+        <projectViewNodeDecorator implementation="dev.friptu.ideguard.GuardProjectViewDecorator"/>
+        <fileIconProvider implementation="dev.friptu.ideguard.GuardFileIconProvider"/>
+
+        <toolWindow id="Claude Edits"
+                    anchor="bottom"
+                    secondary="true"
+                    factoryClass="dev.friptu.ideguard.GuardToolWindowFactory"/>
+
+        <applicationConfigurable parentId="tools"
+                                 instance="dev.friptu.ideguard.GuardConfigurable"
+                                 id="dev.friptu.ideguard.settings"
+                                 displayName="Claude IDE Guard"/>
+    </extensions>
+
+    <projectListeners>
+        <listener class="dev.friptu.ideguard.GuardEditorListener"
+                  topic="com.intellij.openapi.fileEditor.FileEditorManagerListener"/>
+    </projectListeners>
+</idea-plugin>
