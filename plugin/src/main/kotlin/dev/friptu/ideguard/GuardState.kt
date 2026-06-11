@@ -85,14 +85,14 @@ class GuardState {
         return changed
     }
 
-    fun isInFlight(path: String): Boolean {
-        val lock = locks[path] ?: return false
-        return lock.writer != null || lock.readers.isNotEmpty()
+    fun isInFlight(path: String): Boolean = synchronized(mutex) {
+        val lock = locks[path] ?: return@synchronized false
+        lock.writer != null || lock.readers.isNotEmpty()
     }
 
-    fun modeOf(path: String): LockMode? {
-        val lock = locks[path] ?: return null
-        return when {
+    fun modeOf(path: String): LockMode? = synchronized(mutex) {
+        val lock = locks[path] ?: return@synchronized null
+        when {
             lock.writer != null -> LockMode.WRITE
             lock.readers.isNotEmpty() -> LockMode.READ
             else -> null
@@ -100,7 +100,7 @@ class GuardState {
     }
 
     /** Active views (from locks) + recent views (writes), oldest first. */
-    fun snapshot(): List<FileView> {
+    fun snapshot(): List<FileView> = synchronized(mutex) {
         val active = locks.entries.mapNotNull { (path, lock) ->
             val mode = when {
                 lock.writer != null -> LockMode.WRITE
@@ -115,7 +115,7 @@ class GuardState {
         }
         val activePaths = active.mapTo(HashSet()) { it.path }
         val recents = recent.values.filter { it.path !in activePaths }
-        return (active + recents).sortedBy { it.startedAt }
+        (active + recents).sortedBy { it.startedAt }
     }
 
     /**
