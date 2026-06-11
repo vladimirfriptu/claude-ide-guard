@@ -25,6 +25,7 @@
         <toolWindow id="Claude Edits"
                     anchor="bottom"
                     secondary="true"
+                    icon="/icons/claude-toolwindow.svg"
                     factoryClass="dev.friptu.ideguard.GuardToolWindowFactory"/>
 
         <applicationConfigurable parentId="tools"
