@@ -11,3 +11,6 @@ plugin/.intellijPlatform/
 
 # OS noise
 .DS_Store
+
+# Scratch notes
+todo.md
