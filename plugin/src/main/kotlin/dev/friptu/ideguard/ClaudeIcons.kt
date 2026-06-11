@@ -5,6 +5,6 @@ import javax.swing.Icon
 
 /** Bundled icons. */
 object ClaudeIcons {
-    val WRITE: Icon = IconLoader.getIcon("/icons/claude-write.svg", ClaudeIcons::class.java)
-    val READ: Icon = IconLoader.getIcon("/icons/claude-read.svg", ClaudeIcons::class.java)
+    /** The Claude Code mark, used to badge files Claude is reading or writing. */
+    val CLAUDE: Icon = IconLoader.getIcon("/icons/claude.svg", ClaudeIcons::class.java)
 }

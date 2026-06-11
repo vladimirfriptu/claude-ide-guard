@@ -148,7 +148,7 @@ private class GuardCellRenderer(
     }
 
     private fun renderFile(view: FileView) {
-        icon = if (view.mode == LockMode.WRITE) ClaudeIcons.WRITE else ClaudeIcons.READ
+        icon = ClaudeIcons.CLAUDE
         border = JBUI.Borders.empty(2, 6)
 
         val file = File(view.path)
@@ -166,7 +166,7 @@ private class GuardCellRenderer(
 
         val now = clock()
         val timing = when {
-            view.isActive && view.mode == LockMode.WRITE -> formatElapsed(now - view.startedAt)
+            view.isActive && view.mode == LockMode.WRITE -> "writing " + formatElapsed(now - view.startedAt)
             view.isActive -> "reading " + formatElapsed(now - view.startedAt)
             else -> formatAgo(now - (view.endedAt ?: now))
         }

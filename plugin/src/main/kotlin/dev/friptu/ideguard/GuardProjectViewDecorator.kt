@@ -9,14 +9,14 @@ class GuardProjectViewDecorator : ProjectViewNodeDecorator {
     override fun decorate(node: ProjectViewNode<*>, data: PresentationData) {
         val file = node.virtualFile ?: return
         val state = ApplicationManager.getApplication().getService(GuardState::class.java) ?: return
-        val (icon, label) = when (state.modeOf(file.path)) {
-            LockMode.WRITE -> ClaudeIcons.WRITE to "writing"
-            LockMode.READ -> ClaudeIcons.READ to "reading"
+        val label = when (state.modeOf(file.path)) {
+            LockMode.WRITE -> "writing"
+            LockMode.READ -> "reading"
             null -> return
         }
-        // Set the node icon here (runs fresh on every updateFromRoot) so the
-        // eye/axe shows IN the tree icon, not just as text.
-        data.setIcon(icon)
+        // Set the Claude icon here (runs fresh on every updateFromRoot) so the
+        // tree badge updates reliably.
+        data.setIcon(ClaudeIcons.CLAUDE)
         data.locationString = label
         data.forcedTextForeground = GuardColors.PROJECT_VIEW_FOREGROUND
     }
