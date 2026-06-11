@@ -14,6 +14,7 @@ class GuardSettings : PersistentStateComponent<GuardSettings.State> {
     data class State(
         var port: Int = GuardServer.DEFAULT_PORT,
         var lockEditorWhileEditing: Boolean = false,
+        var lockLeaseSeconds: Int = 300,
     )
 
     private var state = State()
@@ -28,6 +29,10 @@ class GuardSettings : PersistentStateComponent<GuardSettings.State> {
     var lockEditorWhileEditing: Boolean
         get() = state.lockEditorWhileEditing
         set(value) { state.lockEditorWhileEditing = value }
+
+    var lockLeaseSeconds: Int
+        get() = state.lockLeaseSeconds
+        set(value) { state.lockLeaseSeconds = value }
 
     companion object {
         fun getInstance(): GuardSettings =
