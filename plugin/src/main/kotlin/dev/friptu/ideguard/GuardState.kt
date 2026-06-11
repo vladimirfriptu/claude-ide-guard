@@ -5,96 +5,146 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
- * Thread-safe registry of files Claude currently has in flight, keyed by
- * absolute path. Pure of any UI/platform concern so it can be unit-tested
- * directly; UI components observe it through [addListener].
- *
- * All mutating calls are idempotent and safe to call from any thread.
+ * Thread-safe readers-writer lock table keyed by absolute path, plus a short
+ * "recently edited" history for writes. Pure of UI/platform concerns so it is
+ * unit-testable; observers subscribe via [addListener]. `now` is passed in so
+ * tests are deterministic.
  */
 @Service(Service.Level.APP)
 class GuardState {
 
-    private val map = ConcurrentHashMap<String, ClaudeEditState>()
-    private val listeners = CopyOnWriteArrayList<() -> Unit>()
+    private class FileLock(var startedAt: Long) {
+        val readers = LinkedHashMap<String, Holder>()
+        var writer: Holder? = null
+    }
 
-    /**
-     * Absolute path of the file the user most recently selected in any editor.
-     * Tracked for future use (e.g. richer queries); the MVP dirty gate ignores it.
-     */
+    private val locks = ConcurrentHashMap<String, FileLock>()
+    private val recent = ConcurrentHashMap<String, FileView>()
+    private val listeners = CopyOnWriteArrayList<() -> Unit>()
+    private val mutex = Any()
+
     @Volatile
     var activeFilePath: String? = null
         private set
 
-    fun setActiveFile(path: String?) {
-        activeFilePath = path
-    }
+    fun setActiveFile(path: String?) { activeFilePath = path }
 
-    /** Registers a listener fired (off any thread) whenever the set changes. */
-    fun addListener(listener: () -> Unit) {
-        listeners.add(listener)
-    }
+    fun addListener(listener: () -> Unit) { listeners.add(listener) }
 
-    /** Adds or refreshes the active (editing) entry for [path]. */
-    fun start(path: String, sessionId: String?, now: Long) {
-        val existing = map[path]
-        map[path] = if (existing != null) {
-            existing.copy(lastSeen = now, endedAt = null, sessionId = sessionId ?: existing.sessionId)
-        } else {
-            ClaudeEditState(path, sessionId, startedAt = now, lastSeen = now, endedAt = null)
-        }
-        notifyListeners()
-    }
-
-    /**
-     * Marks editing of [path] as finished. The entry is NOT removed — it moves
-     * to the "recently edited" state (so the highlight clears but the tool
-     * window keeps it for a while). Returns true if a change happened.
-     */
-    fun end(path: String, now: Long): Boolean {
-        val existing = map[path] ?: return false
-        if (!existing.isEditing) return false
-        map[path] = existing.copy(endedAt = now)
-        notifyListeners()
-        return true
-    }
-
-    /** Whether [path] is actively being edited right now (drives highlights/lock). */
-    fun isInFlight(path: String): Boolean = map[path]?.isEditing == true
-
-    /** All tracked entries (editing + recent), oldest first. Safe snapshot. */
-    fun snapshot(): List<ClaudeEditState> = map.values.sortedBy { it.startedAt }
-
-    /**
-     * Two-stage expiry:
-     * - An editing entry not refreshed within [activeTtlMillis] is moved to the
-     *   recent state (guards stuck highlights when `PostToolUse` never fires).
-     * - A recent entry older than [recentTtlMillis] since it ended is removed.
-     *
-     * Returns the affected paths.
-     */
-    fun sweep(now: Long, activeTtlMillis: Long, recentTtlMillis: Long): List<String> {
-        val changed = ArrayList<String>()
-        for (entry in map.values) {
-            if (entry.isEditing) {
-                if (now - entry.lastSeen > activeTtlMillis) {
-                    map[entry.path] = entry.copy(endedAt = now)
-                    changed.add(entry.path)
+    /** Atomic test-and-set. Returns whether the lock was granted. */
+    fun acquire(path: String, sessionId: String, mode: LockMode, now: Long): AcquireResult {
+        val result: AcquireResult
+        synchronized(mutex) {
+            val lock = locks.getOrPut(path) { FileLock(now) }
+            result = when (mode) {
+                LockMode.READ -> {
+                    val w = lock.writer
+                    if (w != null && w.sessionId != sessionId) {
+                        AcquireResult(false, w.sessionId, LockMode.WRITE)
+                    } else {
+                        val prev = lock.readers[sessionId]
+                        lock.readers[sessionId] = Holder(sessionId, prev?.acquiredAt ?: now, now)
+                        AcquireResult(true)
+                    }
                 }
-            } else {
-                val endedAt = entry.endedAt ?: continue
-                if (now - endedAt > recentTtlMillis) {
-                    map.remove(entry.path)
-                    changed.add(entry.path)
+                LockMode.WRITE -> {
+                    val w = lock.writer
+                    val otherReaders = lock.readers.keys.any { it != sessionId }
+                    val blockedByWriter = w != null && w.sessionId != sessionId
+                    when {
+                        blockedByWriter -> AcquireResult(false, w!!.sessionId, LockMode.WRITE)
+                        otherReaders -> AcquireResult(false, lock.readers.keys.first { it != sessionId }, LockMode.READ)
+                        else -> {
+                            lock.readers.remove(sessionId) // upgrade: drop our own read
+                            lock.writer = Holder(sessionId, w?.acquiredAt ?: now, now)
+                            AcquireResult(true)
+                        }
+                    }
                 }
             }
+            if (result.granted) recent.remove(path)
         }
-        if (changed.isNotEmpty()) notifyListeners()
+        if (result.granted) notifyListeners()
+        return result
+    }
+
+    /** Releases this session's hold on [path]. Returns true if something changed. */
+    fun release(path: String, sessionId: String, now: Long): Boolean {
+        var changed = false
+        synchronized(mutex) {
+            val lock = locks[path] ?: return false
+            if (lock.writer?.sessionId == sessionId) {
+                lock.writer = null
+                recent[path] = FileView(path, LockMode.WRITE, listOf(sessionId), lock.startedAt, now)
+                changed = true
+            }
+            if (lock.readers.remove(sessionId) != null) changed = true
+            if (lock.writer == null && lock.readers.isEmpty()) locks.remove(path)
+        }
+        if (changed) notifyListeners()
         return changed
     }
 
-    private fun notifyListeners() {
-        for (listener in listeners) {
-            runCatching { listener() }
+    fun isInFlight(path: String): Boolean {
+        val lock = locks[path] ?: return false
+        return lock.writer != null || lock.readers.isNotEmpty()
+    }
+
+    fun modeOf(path: String): LockMode? {
+        val lock = locks[path] ?: return null
+        return when {
+            lock.writer != null -> LockMode.WRITE
+            lock.readers.isNotEmpty() -> LockMode.READ
+            else -> null
         }
+    }
+
+    /** Active views (from locks) + recent views (writes), oldest first. */
+    fun snapshot(): List<FileView> {
+        val active = locks.entries.mapNotNull { (path, lock) ->
+            val mode = when {
+                lock.writer != null -> LockMode.WRITE
+                lock.readers.isNotEmpty() -> LockMode.READ
+                else -> return@mapNotNull null
+            }
+            val sessions = buildList {
+                lock.writer?.let { add(it.sessionId) }
+                addAll(lock.readers.keys)
+            }.distinct()
+            FileView(path, mode, sessions, lock.startedAt, endedAt = null)
+        }
+        val activePaths = active.mapTo(HashSet()) { it.path }
+        val recents = recent.values.filter { it.path !in activePaths }
+        return (active + recents).sortedBy { it.startedAt }
+    }
+
+    /**
+     * - Holders with [Holder.lastSeen] older than [leaseMillis] are released
+     *   (a freed writer becomes a recent entry).
+     * - Recent entries older than [recentTtlMillis] are removed.
+     */
+    fun sweep(now: Long, leaseMillis: Long, recentTtlMillis: Long): List<String> {
+        val changed = ArrayList<String>()
+        synchronized(mutex) {
+            for ((path, lock) in locks) {
+                val staleReaders = lock.readers.filterValues { now - it.lastSeen > leaseMillis }.keys
+                staleReaders.forEach { lock.readers.remove(it); changed.add(path) }
+                val w = lock.writer
+                if (w != null && now - w.lastSeen > leaseMillis) {
+                    lock.writer = null
+                    recent[path] = FileView(path, LockMode.WRITE, listOf(w.sessionId), lock.startedAt, now)
+                    changed.add(path)
+                }
+                if (lock.writer == null && lock.readers.isEmpty()) locks.remove(path)
+            }
+            val expiredRecent = recent.values.filter { now - (it.endedAt ?: 0) > recentTtlMillis }.map { it.path }
+            expiredRecent.forEach { recent.remove(it); changed.add(it) }
+        }
+        if (changed.isNotEmpty()) notifyListeners()
+        return changed.distinct()
+    }
+
+    private fun notifyListeners() {
+        for (listener in listeners) runCatching { listener() }
     }
 }

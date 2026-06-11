@@ -30,7 +30,7 @@ object GuardEditorLocker {
             val enabled = GuardSettings.getInstance().lockEditorWhileEditing
             val state = app.getService(GuardState::class.java)
             val desired = if (enabled) {
-                state.snapshot().filter { it.isEditing }.mapTo(HashSet()) { it.path }
+                state.snapshot().filter { it.isActive }.mapTo(HashSet()) { it.path }
             } else {
                 HashSet()
             }

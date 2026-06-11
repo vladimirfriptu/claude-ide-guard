@@ -31,7 +31,7 @@ import javax.swing.SwingUtilities
 /** A row in the tool window: either a section header or a file entry. */
 private sealed interface GuardRow {
     data class Section(val title: String) : GuardRow
-    data class FileRow(val state: ClaudeEditState) : GuardRow
+    data class FileRow(val view: FileView) : GuardRow
 }
 
 /**
@@ -54,7 +54,7 @@ class GuardToolWindowFactory : ToolWindowFactory {
 
         fun openSelected() {
             val row = list.selectedValue as? GuardRow.FileRow ?: return
-            val file = LocalFileSystem.getInstance().findFileByPath(row.state.path) ?: return
+            val file = LocalFileSystem.getInstance().findFileByPath(row.view.path) ?: return
             FileEditorManager.getInstance(project).openFile(file, true)
         }
 
@@ -73,8 +73,8 @@ class GuardToolWindowFactory : ToolWindowFactory {
 
         fun reload() {
             val mine = state.snapshot().filter { fileBelongsToProject(project, it.path) }
-            val active = mine.filter { it.isEditing }.sortedBy { it.startedAt }
-            val recent = mine.filter { !it.isEditing }.sortedByDescending { it.endedAt ?: 0L }
+            val active = mine.filter { it.isActive }.sortedBy { it.startedAt }
+            val recent = mine.filter { !it.isActive }.sortedByDescending { it.endedAt ?: 0L }
             SwingUtilities.invokeLater {
                 model.clear()
                 active.forEach { model.addElement(GuardRow.FileRow(it)) }
@@ -111,9 +111,7 @@ class GuardToolWindowFactory : ToolWindowFactory {
 
 /**
  * Whether [path] belongs to [project] — so each project's tool window lists
- * only its own files when several projects are open at once. A git worktree
- * opened as its own project matches via its own content roots / base path, so
- * its edits show there, not in the main checkout's window.
+ * only its own files when several projects are open at once.
  */
 private fun fileBelongsToProject(project: Project, path: String): Boolean {
     val file = LocalFileSystem.getInstance().findFileByPath(path)
@@ -145,47 +143,43 @@ private class GuardCellRenderer(
                 border = JBUI.Borders.empty(5, 6, 1, 6)
                 append(value.title, SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
             }
-            is GuardRow.FileRow -> renderFile(value.state)
+            is GuardRow.FileRow -> renderFile(value.view)
         }
     }
 
-    private fun renderFile(state: ClaudeEditState) {
-        icon = ClaudeIcons.CLAUDE
+    private fun renderFile(view: FileView) {
+        icon = if (view.mode == LockMode.WRITE) ClaudeIcons.WRITE else ClaudeIcons.READ
         border = JBUI.Borders.empty(2, 6)
 
-        val file = File(state.path)
-        val nameAttributes = if (state.isEditing) {
+        val file = File(view.path)
+        val nameAttributes = if (view.isActive) {
             SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES
         } else {
             SimpleTextAttributes.REGULAR_ATTRIBUTES
         }
         append(file.name, nameAttributes)
 
-        val parentLabel = relativeParent(state.path)
+        val parentLabel = relativeParent(view.path)
         if (parentLabel.isNotEmpty()) {
             append("  $parentLabel", SimpleTextAttributes.GRAYED_ATTRIBUTES)
         }
 
         val now = clock()
-        val timing = if (state.isEditing) {
-            formatElapsed(now - state.startedAt)
-        } else {
-            formatAgo(now - (state.endedAt ?: now))
+        val timing = when {
+            view.isActive && view.mode == LockMode.WRITE -> formatElapsed(now - view.startedAt)
+            view.isActive -> "reading " + formatElapsed(now - view.startedAt)
+            else -> formatAgo(now - (view.endedAt ?: now))
         }
         append("   $timing", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
 
-        state.sessionId?.takeIf { it.isNotBlank() }?.let {
-            append("  ·  ${it.take(8)}", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+        val firstSession = view.sessionIds.firstOrNull()
+        if (firstSession != null) {
+            append("  ·  ${firstSession.take(8)}", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
         }
 
-        toolTipText = state.path
+        toolTipText = view.path
     }
 
-    /**
-     * Parent directory of [filePath], relative to the project root. Empty when
-     * the file sits in the root. Falls back to the absolute parent for files
-     * outside the project (e.g. another open project's file).
-     */
     private fun relativeParent(filePath: String): String {
         val file = File(filePath)
         val parent = file.parentFile?.path ?: return ""
