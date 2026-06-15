@@ -16,6 +16,7 @@ class GuardConfigurable : Configurable {
     private var lockCheckBox: JBCheckBox? = null
     private var leaseField: JBTextField? = null
     private var bashCheckBox: JBCheckBox? = null
+    private var worktreeCheckBox: JBCheckBox? = null
 
     override fun getDisplayName(): String = "Claude IDE Guard"
 
@@ -29,6 +30,8 @@ class GuardConfigurable : Configurable {
         leaseField = lease
         val bash = JBCheckBox("Detect file access in Bash commands (cat, >, cp, sed -i, …)", settings.bashDetectionEnabled)
         bashCheckBox = bash
+        val worktree = JBCheckBox("Show Claude activity in this project's git worktrees", settings.showWorktreeActivity)
+        worktreeCheckBox = worktree
 
         return FormBuilder.createFormBuilder()
             .addLabeledComponent("HTTP server port:", field)
@@ -39,6 +42,8 @@ class GuardConfigurable : Configurable {
             .addComponent(JBLabel("How long a held lock survives without refresh before it is force-released (default 300)."))
             .addComponent(bash)
             .addComponent(JBLabel("Heuristic. Off-by-default-safe; uncheck if it locks the wrong files."))
+            .addComponent(worktree)
+            .addComponent(JBLabel("Lists activity from the repo's worktrees under a collapsible block; those files cannot be opened from here."))
             .panel
     }
 
@@ -47,7 +52,8 @@ class GuardConfigurable : Configurable {
         return portField?.text?.trim() != settings.port.toString() ||
             lockCheckBox?.isSelected != settings.lockEditorWhileEditing ||
             leaseField?.text?.trim() != settings.lockLeaseSeconds.toString() ||
-            bashCheckBox?.isSelected != settings.bashDetectionEnabled
+            bashCheckBox?.isSelected != settings.bashDetectionEnabled ||
+            worktreeCheckBox?.isSelected != settings.showWorktreeActivity
     }
 
     override fun apply() {
@@ -64,6 +70,7 @@ class GuardConfigurable : Configurable {
         settings.port = port
         settings.lockEditorWhileEditing = lockCheckBox?.isSelected ?: false
         settings.bashDetectionEnabled = bashCheckBox?.isSelected ?: true
+        settings.showWorktreeActivity = worktreeCheckBox?.isSelected ?: true
         settings.lockLeaseSeconds = lease
 
         if (portChanged) {
@@ -78,6 +85,7 @@ class GuardConfigurable : Configurable {
         portField?.text = settings.port.toString()
         lockCheckBox?.isSelected = settings.lockEditorWhileEditing
         bashCheckBox?.isSelected = settings.bashDetectionEnabled
+        worktreeCheckBox?.isSelected = settings.showWorktreeActivity
         leaseField?.text = settings.lockLeaseSeconds.toString()
     }
 
@@ -86,5 +94,6 @@ class GuardConfigurable : Configurable {
         lockCheckBox = null
         leaseField = null
         bashCheckBox = null
+        worktreeCheckBox = null
     }
 }

@@ -9,11 +9,18 @@ class GuardRouter(
     private val dirtyChecker: DirtyChecker,
     private val bashEnabled: () -> Boolean = { true },
     private val projectRoots: () -> List<String> = { emptyList() },
+    private val worktreeCacheSize: () -> Int = { 0 },
     private val clock: () -> Long,
 ) {
     data class Result(val status: Int, val body: String)
 
-    fun health(): Result = Result(200, """{"ok":true}""")
+    /** Liveness + self-diagnostics: sizes of the internal tables, to spot leaks. */
+    fun health(): Result {
+        val d = state.diagnostics()
+        val body = "{\"ok\":true,\"locks\":${d.locks},\"recent\":${d.recent}," +
+            "\"listeners\":${d.listeners},\"worktreeCache\":${worktreeCacheSize()}}"
+        return Result(200, body)
+    }
 
     /** `POST /acquire {path, sessionId, mode}`. */
     fun acquire(body: String): Result {

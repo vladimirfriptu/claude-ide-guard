@@ -81,7 +81,7 @@ cd plugin
 Quick server check (with a sandbox or a real IDE running and a project open):
 
 ```sh
-curl -s 127.0.0.1:7337/health           # → {"ok":true}
+curl -s 127.0.0.1:7337/health           # → {"ok":true,"locks":0,"recent":0,"listeners":1,"worktreeCache":0}
 ```
 
 ## Install into your real WebStorm
@@ -150,9 +150,21 @@ session's lock set. Response: `{ "ok": true }`.
 
 ### `GET /health`
 
+Liveness plus self-diagnostics — the live sizes of the plugin's internal
+tables, so you can spot a leak without a heap dump:
+
 ```json
-{ "ok": true }
+{ "ok": true, "locks": 0, "recent": 0, "listeners": 1, "worktreeCache": 0 }
 ```
+
+- `locks` — paths currently in flight (held by an agent).
+- `recent` — finished writes still lingering in history (TTL-expired by the sweep).
+- `listeners` — UI observers of the lock state. Expect roughly one per open
+  "Claude Edits" tool window plus two internal singletons; a value that climbs
+  over time without windows opening means a listener leak (the sweep also logs a
+  warning past a threshold).
+- `worktreeCache` — cached git worktree lookups; dropped automatically under IDE
+  memory pressure.
 
 ## Connect Claude Code (install the hooks)
 

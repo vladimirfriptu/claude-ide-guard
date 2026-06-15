@@ -23,13 +23,32 @@ class GuardState {
     private val listeners = CopyOnWriteArrayList<() -> Unit>()
     private val mutex = Any()
 
+    /** Handle to remove a previously registered listener. */
+    fun interface Subscription {
+        fun unsubscribe()
+    }
+
+    /** Live sizes of the internal tables — cheap self-diagnostics for leak detection. */
+    data class Diagnostics(val locks: Int, val recent: Int, val listeners: Int)
+
+    fun diagnostics(): Diagnostics =
+        synchronized(mutex) { Diagnostics(locks.size, recent.size, listeners.size) }
+
     @Volatile
     var activeFilePath: String? = null
         private set
 
     fun setActiveFile(path: String?) { activeFilePath = path }
 
-    fun addListener(listener: () -> Unit) { listeners.add(listener) }
+    /**
+     * Registers [listener]. The returned [Subscription] removes it again — callers
+     * tied to a shorter lifecycle than this app-level service (e.g. a tool window)
+     * MUST unsubscribe on dispose, or they leak their captured UI on every reopen.
+     */
+    fun addListener(listener: () -> Unit): Subscription {
+        listeners.add(listener)
+        return Subscription { listeners.remove(listener) }
+    }
 
     /** Atomic test-and-set. Returns whether the lock was granted. */
     fun acquire(path: String, sessionId: String, mode: LockMode, now: Long): AcquireResult {

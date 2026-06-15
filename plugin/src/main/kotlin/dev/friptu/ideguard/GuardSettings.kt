@@ -16,6 +16,7 @@ class GuardSettings : PersistentStateComponent<GuardSettings.State> {
         var lockEditorWhileEditing: Boolean = false,
         var lockLeaseSeconds: Int = 300,
         var bashDetectionEnabled: Boolean = true,
+        var showWorktreeActivity: Boolean = true,
     )
 
     private var state = State()
@@ -38,6 +39,10 @@ class GuardSettings : PersistentStateComponent<GuardSettings.State> {
     var bashDetectionEnabled: Boolean
         get() = state.bashDetectionEnabled
         set(value) { state.bashDetectionEnabled = value }
+
+    var showWorktreeActivity: Boolean
+        get() = state.showWorktreeActivity
+        set(value) { state.showWorktreeActivity = value }
 
     companion object {
         fun getInstance(): GuardSettings =

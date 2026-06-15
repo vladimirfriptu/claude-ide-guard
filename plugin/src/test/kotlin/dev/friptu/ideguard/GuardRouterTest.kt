@@ -26,6 +26,16 @@ class GuardRouterTest {
     }
 
     @Test
+    fun healthReportsDiagnosticCounts() {
+        val (r, _) = router()
+        r.acquire("""{"path":"/a","sessionId":"s1","mode":"write"}""")
+        val body = r.health().body
+        assertTrue(body.contains("\"locks\":1"))
+        assertTrue(body.contains("\"listeners\":0"))
+        assertTrue(body.contains("\"worktreeCache\":0"))
+    }
+
+    @Test
     fun acquireWriteGrantedAndRegistersHolder() {
         val (r, state) = router()
         val res = r.acquire("""{"path":"/a","sessionId":"s1","mode":"write"}""")

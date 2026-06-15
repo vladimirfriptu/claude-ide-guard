@@ -5,6 +5,7 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.logger
 import com.intellij.openapi.project.ProjectManager
+import com.intellij.openapi.util.LowMemoryWatcher
 import com.intellij.util.concurrency.AppExecutorUtil
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
@@ -42,9 +43,17 @@ class GuardServer : Disposable {
             state,
             PlatformDirtyChecker(),
             { GuardSettings.getInstance().bashDetectionEnabled },
-            { ProjectManager.getInstance().openProjects.mapNotNull { it.basePath } },
+            {
+                val bases = ProjectManager.getInstance().openProjects.mapNotNull { it.basePath }
+                WorktreeResolver.expandBashRoots(bases, GuardSettings.getInstance().showWorktreeActivity)
+            },
+            worktreeCacheSize = { WorktreeResolver.cacheSize() },
         ) { System.currentTimeMillis() }
     }
+
+    /** Logged once when the listener table crosses [LISTENER_WARN_THRESHOLD], reset when it falls back. */
+    @Volatile
+    private var leakWarned = false
 
     /** Starts the server (idempotent) plus the one-time sweep + UI wiring. */
     @Synchronized
@@ -52,11 +61,15 @@ class GuardServer : Disposable {
         if (!initialized) {
             GuardUiRefresher.install(state)
             GuardEditorLocker.install(state)
+            // Under IDE memory pressure, drop the (rebuildable) worktree cache.
+            // Tied to this Disposable service, so it is unregistered on dispose.
+            LowMemoryWatcher.register({ WorktreeResolver.clearCache() }, this)
             sweepFuture = AppExecutorUtil.getAppScheduledExecutorService().scheduleWithFixedDelay(
                 {
                     runCatching {
                         val lease = GuardSettings.getInstance().lockLeaseSeconds * 1000L
                         state.sweep(System.currentTimeMillis(), lease, RECENT_TTL_MILLIS)
+                        warnIfLeaking()
                     }
                 },
                 SWEEP_INTERVAL_SEC, SWEEP_INTERVAL_SEC, TimeUnit.SECONDS,
@@ -113,6 +126,23 @@ class GuardServer : Disposable {
         executor = null
     }
 
+    /** Warns once if the listener table looks like it is growing without bound. */
+    private fun warnIfLeaking() {
+        val d = state.diagnostics()
+        if (d.listeners > LISTENER_WARN_THRESHOLD) {
+            if (!leakWarned) {
+                leakWarned = true
+                log.warn(
+                    "claude-ide-guard: GuardState listener count is high (${d.listeners}) — " +
+                        "possible listener leak. locks=${d.locks} recent=${d.recent} " +
+                        "worktreeCache=${WorktreeResolver.cacheSize()}",
+                )
+            }
+        } else {
+            leakWarned = false
+        }
+    }
+
     private fun dispatch(exchange: HttpExchange, handler: () -> GuardRouter.Result) {
         try {
             val result = handler()
@@ -139,6 +169,9 @@ class GuardServer : Disposable {
         const val PORT_PROPERTY = "claude.ide.guard.port"
         const val RECENT_TTL_MILLIS = 15 * 60_000L
         const val SWEEP_INTERVAL_SEC = 15L
+
+        /** Realistic ceiling is a handful (one per open tool window); above this signals a leak. */
+        const val LISTENER_WARN_THRESHOLD = 50
 
         fun respondJson(exchange: HttpExchange, status: Int, body: String) {
             val bytes = body.toByteArray(StandardCharsets.UTF_8)

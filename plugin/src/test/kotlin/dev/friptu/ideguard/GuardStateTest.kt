@@ -103,6 +103,39 @@ class GuardStateTest {
     }
 
     @Test
+    fun unsubscribedListenerStopsFiring() {
+        val s = GuardState()
+        val calls = AtomicInteger(0)
+        val subscription = s.addListener { calls.incrementAndGet() }
+        s.acquire("/a", "s1", LockMode.READ, now = 10)   // fires
+        val afterFirst = calls.get()
+        assertTrue(afterFirst >= 1)
+        subscription.unsubscribe()
+        s.release("/a", "s1", now = 12)                  // must NOT fire after unsubscribe
+        assertEquals(afterFirst, calls.get())
+    }
+
+    @Test
+    fun listenerCountReturnsToBaselineAfterUnsubscribe() {
+        val s = GuardState()
+        val baseline = s.diagnostics().listeners
+        val subs = (1..50).map { s.addListener { } }
+        assertEquals(baseline + 50, s.diagnostics().listeners)
+        subs.forEach { it.unsubscribe() }
+        assertEquals(baseline, s.diagnostics().listeners)
+    }
+
+    @Test
+    fun diagnosticsReportTableSizes() {
+        val s = GuardState()
+        s.acquire("/a", "s1", LockMode.WRITE, now = 10)   // 1 active lock
+        s.release("/a", "s1", now = 20)                   // becomes 1 recent, lock cleared
+        val d = s.diagnostics()
+        assertEquals(0, d.locks)
+        assertEquals(1, d.recent)
+    }
+
+    @Test
     fun acquireSetGrantsAllOrNothing() {
         val s = GuardState()
         // s2 holds a write on /b -> the whole set must be denied
