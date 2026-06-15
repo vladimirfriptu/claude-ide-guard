@@ -51,7 +51,7 @@ class GuardStateTest {
     }
 
     @Test
-    fun writeReleaseLingersAsRecentReadReleaseDoesNot() {
+    fun writeAndReadBothLingerAsRecentAfterRelease() {
         val s = GuardState()
         s.acquire("/w", "s1", LockMode.WRITE, now = 10)
         s.release("/w", "s1", now = 20)
@@ -62,7 +62,32 @@ class GuardStateTest {
         val w = views.first { it.path == "/w" }
         assertFalse(w.isActive)
         assertEquals(LockMode.WRITE, w.mode)
-        assertNull(views.firstOrNull { it.path == "/r" }) // read leaves nothing behind
+        val r = views.first { it.path == "/r" } // reads now linger so they don't flash
+        assertFalse(r.isActive)
+        assertEquals(LockMode.READ, r.mode)
+    }
+
+    @Test
+    fun readAfterWriteKeepsEditedHistory() {
+        val s = GuardState()
+        s.acquire("/f", "s1", LockMode.WRITE, now = 10)
+        s.release("/f", "s1", now = 20)            // recorded as a recent WRITE
+        s.acquire("/f", "s1", LockMode.READ, now = 30)
+        s.release("/f", "s1", now = 40)            // a later read must NOT erase the edit
+        val v = s.snapshot().first { it.path == "/f" }
+        assertFalse(v.isActive)
+        assertEquals(LockMode.WRITE, v.mode)       // still shown as edited
+    }
+
+    @Test
+    fun readRecentExpiresBeforeWriteRecent() {
+        val s = GuardState()
+        s.acquire("/w", "s1", LockMode.WRITE, now = 1_000); s.release("/w", "s1", now = 2_000)
+        s.acquire("/r", "s1", LockMode.READ, now = 1_000); s.release("/r", "s1", now = 2_000)
+        // 90s on: read recent (60s TTL) is gone, write recent (15min TTL) survives
+        s.sweep(now = 92_000, leaseMillis = 300_000, recentTtlMillis = 900_000, readRecentTtlMillis = 60_000)
+        assertNull(s.snapshot().firstOrNull { it.path == "/r" })
+        assertEquals(LockMode.WRITE, s.snapshot().first { it.path == "/w" }.mode)
     }
 
     @Test

@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "dev.friptu"
-version = "0.5.0"
+version = "0.5.1"
 
 repositories {
     mavenCentral()

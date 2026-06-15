@@ -122,7 +122,7 @@ class GuardToolWindowFactory : ToolWindowFactory {
                 model.clear()
                 active.forEach { model.addElement(GuardRow.FileRow(it)) }
                 if (recent.isNotEmpty()) {
-                    model.addElement(GuardRow.Section("Recently edited"))
+                    model.addElement(GuardRow.Section("Recently accessed"))
                     recent.forEach { model.addElement(GuardRow.FileRow(it)) }
                 }
                 if (showWt && wtSorted.isNotEmpty()) {
@@ -270,7 +270,7 @@ private class GuardCellRenderer(
         return when {
             view.isActive && view.mode == LockMode.WRITE -> "writing " + formatElapsed(now - view.startedAt)
             view.isActive -> "reading " + formatElapsed(now - view.startedAt)
-            else -> formatAgo(now - (view.endedAt ?: now))
+            else -> formatAgo(now - (view.endedAt ?: now), if (view.mode == LockMode.WRITE) "edited" else "read")
         }
     }
 
@@ -294,10 +294,10 @@ private class GuardCellRenderer(
         return if (minutes > 0) "${minutes}m ${seconds}s" else "${seconds}s"
     }
 
-    private fun formatAgo(millis: Long): String {
+    private fun formatAgo(millis: Long, verb: String): String {
         val totalSeconds = (millis / 1000).coerceAtLeast(0)
-        if (totalSeconds < 60) return "edited just now"
+        if (totalSeconds < 60) return "$verb just now"
         val minutes = totalSeconds / 60
-        return "edited ${minutes}m ago"
+        return "$verb ${minutes}m ago"
     }
 }

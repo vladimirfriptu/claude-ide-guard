@@ -68,7 +68,7 @@ class GuardServer : Disposable {
                 {
                     runCatching {
                         val lease = GuardSettings.getInstance().lockLeaseSeconds * 1000L
-                        state.sweep(System.currentTimeMillis(), lease, RECENT_TTL_MILLIS)
+                        state.sweep(System.currentTimeMillis(), lease, RECENT_TTL_MILLIS, READ_RECENT_TTL_MILLIS)
                         warnIfLeaking()
                     }
                 },
@@ -168,6 +168,8 @@ class GuardServer : Disposable {
         const val DEFAULT_PORT = 7337
         const val PORT_PROPERTY = "claude.ide.guard.port"
         const val RECENT_TTL_MILLIS = 15 * 60_000L
+        /** Reads linger only briefly after they finish, just long enough not to flash. */
+        const val READ_RECENT_TTL_MILLIS = 60_000L
         const val SWEEP_INTERVAL_SEC = 15L
 
         /** Realistic ceiling is a handful (one per open tool window); above this signals a leak. */

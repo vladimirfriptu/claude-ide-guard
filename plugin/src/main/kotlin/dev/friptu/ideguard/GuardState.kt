@@ -128,7 +128,9 @@ class GuardState {
                 }
             }
         }
-        if (result.granted) recent.remove(path)
+        // Do NOT clear recent history here: a re-acquire (e.g. reading a file we
+        // just wrote) must not erase the earlier edit. While active the path is
+        // deduped out of recents by [snapshot]; a later release refreshes it.
         return result
     }
 
@@ -142,9 +144,22 @@ class GuardState {
             if (recordHistory) recent[path] = FileView(path, LockMode.WRITE, listOf(sessionId), lock.startedAt, now)
             changed = true
         }
-        if (lock.readers.remove(sessionId) != null) changed = true
+        if (lock.readers.remove(sessionId) != null) {
+            changed = true
+            // Reads linger too, so they don't flash on/off — but never downgrade
+            // an existing edit record (a writer still holding it, or a recent WRITE).
+            if (recordHistory && lock.writer == null) lingerRead(path, listOf(sessionId), lock.startedAt, now)
+        }
         if (lock.writer == null && lock.readers.isEmpty()) locks.remove(path)
         return changed
+    }
+
+    /** Records a recent READ for [path] unless an edit (recent WRITE) is already there. */
+    private fun lingerRead(path: String, sessionIds: List<String>, startedAt: Long, now: Long) {
+        val existing = recent[path]
+        if (existing == null || existing.mode == LockMode.READ) {
+            recent[path] = FileView(path, LockMode.READ, sessionIds, startedAt, now)
+        }
     }
 
     fun isInFlight(path: String): Boolean = synchronized(mutex) {
@@ -182,14 +197,21 @@ class GuardState {
 
     /**
      * - Holders with [Holder.lastSeen] older than [leaseMillis] are released
-     *   (a freed writer becomes a recent entry).
-     * - Recent entries older than [recentTtlMillis] are removed.
+     *   (a freed writer/reader becomes a recent entry).
+     * - Recent WRITE entries older than [recentTtlMillis] are removed; recent READ
+     *   entries use the shorter [readRecentTtlMillis] so reads don't linger as long
+     *   as edits.
      */
-    fun sweep(now: Long, leaseMillis: Long, recentTtlMillis: Long): List<String> {
+    fun sweep(
+        now: Long,
+        leaseMillis: Long,
+        recentTtlMillis: Long,
+        readRecentTtlMillis: Long = recentTtlMillis,
+    ): List<String> {
         val changed = ArrayList<String>()
         synchronized(mutex) {
             for ((path, lock) in locks) {
-                val staleReaders = lock.readers.filterValues { now - it.lastSeen > leaseMillis }.keys
+                val staleReaders = lock.readers.filterValues { now - it.lastSeen > leaseMillis }.keys.toList()
                 staleReaders.forEach { lock.readers.remove(it); changed.add(path) }
                 val w = lock.writer
                 if (w != null && now - w.lastSeen > leaseMillis) {
@@ -197,9 +219,16 @@ class GuardState {
                     recent[path] = FileView(path, LockMode.WRITE, listOf(w.sessionId), lock.startedAt, now)
                     changed.add(path)
                 }
+                // Force-released reads linger too (write-wins, same as explicit release).
+                if (staleReaders.isNotEmpty() && lock.writer == null) {
+                    lingerRead(path, staleReaders, lock.startedAt, now)
+                }
                 if (lock.writer == null && lock.readers.isEmpty()) locks.remove(path)
             }
-            val expiredRecent = recent.values.filter { now - (it.endedAt ?: 0) > recentTtlMillis }.map { it.path }
+            val expiredRecent = recent.values.filter {
+                val ttl = if (it.mode == LockMode.WRITE) recentTtlMillis else readRecentTtlMillis
+                now - (it.endedAt ?: 0) > ttl
+            }.map { it.path }
             expiredRecent.forEach { recent.remove(it); changed.add(it) }
         }
         if (changed.isNotEmpty()) notifyListeners()
