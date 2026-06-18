@@ -99,6 +99,9 @@ class GuardToolWindowFactory : ToolWindowFactory {
             val wt = ArrayList<Pair<FileView, String>>()
             if (thisView != null) {
                 for (v in snapshot) {
+                    // History keeps edits only; a finished read leaves no trace.
+                    // Reads still show while in flight (the runtime "reading" row).
+                    if (!v.isActive && v.mode == LockMode.READ) continue
                     when (Ownership.bucketFor(v.path, thisView, views)) {
                         OwnershipBucket.OWN -> own.add(v)
                         OwnershipBucket.WORKTREE -> if (showWt) {
@@ -122,7 +125,7 @@ class GuardToolWindowFactory : ToolWindowFactory {
                 model.clear()
                 active.forEach { model.addElement(GuardRow.FileRow(it)) }
                 if (recent.isNotEmpty()) {
-                    model.addElement(GuardRow.Section("Recently accessed"))
+                    model.addElement(GuardRow.Section("Recently edited"))
                     recent.forEach { model.addElement(GuardRow.FileRow(it)) }
                 }
                 if (showWt && wtSorted.isNotEmpty()) {
@@ -270,7 +273,8 @@ private class GuardCellRenderer(
         return when {
             view.isActive && view.mode == LockMode.WRITE -> "writing " + formatElapsed(now - view.startedAt)
             view.isActive -> "reading " + formatElapsed(now - view.startedAt)
-            else -> formatAgo(now - (view.endedAt ?: now), if (view.mode == LockMode.WRITE) "edited" else "read")
+            // Only finished edits reach history now, so the past-tense label is always "edited".
+            else -> formatAgo(now - (view.endedAt ?: now), "edited")
         }
     }
 
